@@ -572,6 +572,19 @@ func (r *NodePoolReconciler) createNodeClaim(ctx context.Context, nodePool *clou
 		return fmt.Errorf("failed to create NodeClaim: %w", err)
 	}
 
+	// The API server strips status on Create, so set the initial status via a
+	// separate status update.
+	nodeClaim.Status = cloudburstv1alpha1.NodeClaimStatus{
+		Phase: cloudburstv1alpha1.NodeClaimPhasePending,
+		Timestamps: cloudburstv1alpha1.NodeClaimTimestamps{
+			CreatedAt:      metav1.Now(),
+			LastTransition: metav1.Now(),
+		},
+	}
+	if err := r.Status().Update(ctx, nodeClaim); err != nil {
+		logger.Error(err, "failed to set initial NodeClaim status", "nodeClaim", nodeClaim.Name)
+	}
+
 	logger.Info("created NodeClaim",
 		"nodeClaim", nodeClaim.Name,
 		"provider", recommendation.Provider,

@@ -158,12 +158,16 @@ func TestCheckScaleDown_TTLExpiry(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create fake client
+			// Create fake client with status subresource support for NodeClaim
 			objs := []client.Object{tt.nodePool}
 			for i := range tt.nodeClaims {
 				objs = append(objs, &tt.nodeClaims[i])
 			}
-			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objs...).
+				WithStatusSubresource(&cloudburstv1alpha1.NodeClaim{}).
+				Build()
 
 			reconciler := &NodePoolReconciler{
 				Client: fakeClient,
