@@ -1,4 +1,8 @@
-# Cloudburst Autoscaler
+<p align="center">
+  <img src="assets/logo.png" alt="Cloudburst Autoscaler" width="200">
+</p>
+
+<h1 align="center">Cloudburst Autoscaler</h1>
 
 A Kubernetes controller that automatically provisions cloud VMs as worker nodes in response to unschedulable pod demand. When pods cannot be scheduled due to insufficient capacity, the controller requests an optimal instance from [CloudBroker](https://github.com/braghettos/cloudbroker), provisions a GCP VM, bootstraps it into the cluster via `kubeadm join`, and removes it when no longer needed.
 
