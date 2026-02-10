@@ -84,12 +84,12 @@ func (j *JoinCommandProvider) GetJoinCommand(ctx context.Context) (string, error
 		// Fallback: try default kind cluster name
 		kindClusterName = "cloudburst"
 	}
-	
+
 	// Use Kubernetes API if clientset is available to create bootstrap token securely
 	if j.clientset != nil && j.restConfig != nil {
 		return j.getJoinCommandViaAPI(ctx, kindClusterName)
 	}
-	
+
 	// Fallback to kubectl exec (for backward compatibility or when running outside cluster)
 	return j.getJoinCommandViaKubectl(ctx, "", "")
 }
@@ -102,18 +102,18 @@ func (j *JoinCommandProvider) getJoinCommandViaAPI(ctx context.Context, kindClus
 	if err != nil {
 		return "", fmt.Errorf("failed to generate token ID: %w", err)
 	}
-	
+
 	tokenSecret, err := generateTokenSecret()
 	if err != nil {
 		return "", fmt.Errorf("failed to generate token secret: %w", err)
 	}
-	
+
 	token := fmt.Sprintf("%s.%s", tokenID, tokenSecret)
-	
+
 	// Calculate expiration time
 	ttl := time.Duration(j.tokenTTL) * time.Minute
 	expiration := time.Now().Add(ttl).Format(time.RFC3339)
-	
+
 	// Create the bootstrap token Secret
 	// Bootstrap token secrets follow the naming convention: bootstrap-token-<token-id>
 	secretName := fmt.Sprintf("bootstrap-token-%s", tokenID)
@@ -133,28 +133,28 @@ func (j *JoinCommandProvider) getJoinCommandViaAPI(ctx context.Context, kindClus
 			"description":                    []byte("Token created by cloudburst-autoscaler"),
 		},
 	}
-	
+
 	// Create the Secret
 	_, err = j.clientset.CoreV1().Secrets(metav1.NamespaceSystem).Create(ctx, secret, metav1.CreateOptions{})
 	if err != nil {
 		return "", fmt.Errorf("failed to create bootstrap token secret: %w", err)
 	}
-	
+
 	// Get the API server endpoint and CA certificate hash
 	apiServerEndpoint, err := j.getAPIServerEndpoint(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get API server endpoint: %w", err)
 	}
-	
+
 	caHash, err := j.getCAHash(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get CA certificate hash: %w", err)
 	}
-	
+
 	// Construct the kubeadm join command
 	joinCommand := fmt.Sprintf("kubeadm join %s --token %s --discovery-token-ca-cert-hash sha256:%s",
 		apiServerEndpoint, token, caHash)
-	
+
 	return joinCommand, nil
 }
 
@@ -205,12 +205,12 @@ func (j *JoinCommandProvider) getCAHash(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to get kube-root-ca.crt configmap: %w", err)
 	}
-	
+
 	caCert, ok := cm.Data["ca.crt"]
 	if !ok {
 		return "", fmt.Errorf("ca.crt not found in kube-root-ca.crt configmap")
 	}
-	
+
 	// Calculate SHA256 hash of the CA certificate
 	// The hash is the first 64 characters of the SHA256 hash in hex format
 	hasher := sha256.New()

@@ -34,7 +34,7 @@ import (
 // MockGCPProvisioner is a mock provisioner for testing
 type MockGCPProvisioner struct {
 	deleteInstanceCalled bool
-	deleteInstanceError   error
+	deleteInstanceError  error
 }
 
 func (m *MockGCPProvisioner) DeleteInstance(ctx context.Context, instanceID string) error {
@@ -48,12 +48,12 @@ func TestHandleDeleting_DeleteFlow(t *testing.T) {
 	corev1.AddToScheme(scheme)
 
 	tests := []struct {
-		name            string
-		nodeClaim       *cloudburstv1alpha1.NodeClaim
-		node            *corev1.Node
-		pods            []corev1.Pod
-		nodeClass       *cloudburstv1alpha1.NodeClass
-		expectNodePatch bool
+		name             string
+		nodeClaim        *cloudburstv1alpha1.NodeClaim
+		node             *corev1.Node
+		pods             []corev1.Pod
+		nodeClass        *cloudburstv1alpha1.NodeClass
+		expectNodePatch  bool
 		expectNodeDelete bool
 		expectPodDelete  bool
 	}{
@@ -68,7 +68,7 @@ func TestHandleDeleting_DeleteFlow(t *testing.T) {
 					NodeClassRef: "test-nodeclass",
 				},
 				Status: cloudburstv1alpha1.NodeClaimStatus{
-					Phase:     cloudburstv1alpha1.NodeClaimPhaseDeleting,
+					Phase:      cloudburstv1alpha1.NodeClaimPhaseDeleting,
 					InstanceID: "projects/test/zones/us-central1-a/instances/test-instance",
 					NodeName:   "test-node",
 				},
@@ -104,7 +104,7 @@ func TestHandleDeleting_DeleteFlow(t *testing.T) {
 					},
 				},
 			},
-			expectNodePatch: true,
+			expectNodePatch:  true,
 			expectNodeDelete: true,
 			expectPodDelete:  true,
 		},

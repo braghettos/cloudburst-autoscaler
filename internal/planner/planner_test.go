@@ -74,7 +74,7 @@ func TestCalculateDesiredCapacityForPod(t *testing.T) {
 					},
 				},
 			},
-			expectedCPU:    500, // 200m + 300m
+			expectedCPU:    500,       // 200m + 300m
 			expectedMemory: 805306368, // 256Mi + 512Mi = 768Mi in bytes
 		},
 		{
@@ -103,7 +103,7 @@ func TestCalculateDesiredCapacityForPod(t *testing.T) {
 					},
 				},
 			},
-			expectedCPU:    500, // max(500m init, 200m container) = 500m
+			expectedCPU:    500,        // max(500m init, 200m container) = 500m
 			expectedMemory: 1073741824, // max(1Gi init, 256Mi container) = 1Gi
 		},
 		{
@@ -132,7 +132,7 @@ func TestCalculateDesiredCapacityForPod(t *testing.T) {
 					},
 				},
 			},
-			expectedCPU:    300, // max(100m init, 300m container) = 300m
+			expectedCPU:    300,       // max(100m init, 300m container) = 300m
 			expectedMemory: 536870912, // max(128Mi init, 512Mi container) = 512Mi
 		},
 		{
@@ -169,7 +169,7 @@ func TestCalculateDesiredCapacityForPod(t *testing.T) {
 					},
 				},
 			},
-			expectedCPU:    400, // max(200m, 400m init, 100m container) = 400m
+			expectedCPU:    400,       // max(200m, 400m init, 100m container) = 400m
 			expectedMemory: 536870912, // max(256Mi, 512Mi init, 128Mi container) = 512Mi
 		},
 		{
@@ -201,17 +201,17 @@ func TestCalculateDesiredCapacityForPod(t *testing.T) {
 
 func TestCalculateDesiredCapacity(t *testing.T) {
 	tests := []struct {
-		name            string
-		pods            []corev1.Pod
-		expectedCPU     int64
-		expectedMemory  int64
+		name             string
+		pods             []corev1.Pod
+		expectedCPU      int64
+		expectedMemory   int64
 		expectedPodCount int
 	}{
 		{
-			name: "empty pod list",
-			pods: []corev1.Pod{},
-			expectedCPU:     0,
-			expectedMemory: 0,
+			name:             "empty pod list",
+			pods:             []corev1.Pod{},
+			expectedCPU:      0,
+			expectedMemory:   0,
 			expectedPodCount: 0,
 		},
 		{
@@ -233,8 +233,8 @@ func TestCalculateDesiredCapacity(t *testing.T) {
 					},
 				},
 			},
-			expectedCPU:     100,
-			expectedMemory:  134217728,
+			expectedCPU:      100,
+			expectedMemory:   134217728,
 			expectedPodCount: 1,
 		},
 		{
@@ -271,8 +271,8 @@ func TestCalculateDesiredCapacity(t *testing.T) {
 					},
 				},
 			},
-			expectedCPU:     500, // 200m + 300m
-			expectedMemory:  805306368, // 256Mi + 512Mi
+			expectedCPU:      500,       // 200m + 300m
+			expectedMemory:   805306368, // 256Mi + 512Mi
 			expectedPodCount: 2,
 		},
 		{
@@ -319,8 +319,8 @@ func TestCalculateDesiredCapacity(t *testing.T) {
 					},
 				},
 			},
-			expectedCPU:     600, // max(500m init, 200m container) + 100m = 500m + 100m
-			expectedMemory:  1207959552, // max(1Gi init, 256Mi container) + 128Mi = 1073741824 + 134217728
+			expectedCPU:      600,        // max(500m init, 200m container) + 100m = 500m + 100m
+			expectedMemory:   1207959552, // max(1Gi init, 256Mi container) + 128Mi = 1073741824 + 134217728
 			expectedPodCount: 2,
 		},
 	}

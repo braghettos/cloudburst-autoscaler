@@ -52,18 +52,14 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Install kubebuilder tools
-        run: |
-          curl -sSLo envtest-bins.tar.gz "https://go.kubebuilder.io/test-tools/1.29.1/$(go env GOOS)/$(go env GOARCH)"
-          mkdir -p /usr/local/kubebuilder/bin
-          tar -C /usr/local/kubebuilder/bin --strip-components=2 -xzf envtest-bins.tar.gz
-          rm envtest-bins.tar.gz
+      - name: Install setup-envtest
+        run: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
 
       - name: Run tests
         run: |
-          KUBEBUILDER_ASSETS="/usr/local/kubebuilder/bin" go test ./... -coverprofile=cover.out -race -v
-        env:
-          KUBEBUILDER_ASSETS: /usr/local/kubebuilder/bin
+          KUBEBUILDER_ASSETS="$(setup-envtest use 1.29.1 --bin-dir /tmp/envtest -p path)"
+          export KUBEBUILDER_ASSETS
+          go test ./... -coverprofile=cover.out -race -v
 
       - name: Upload coverage
         uses: actions/upload-artifact@v4
@@ -102,7 +98,7 @@ jobs:
 
       - name: Generate manifests
         run: |
-          controller-gen rbac:roleName=manager-role crd paths="./..." output:crd:artifacts:config=config/crd/bases
+          controller-gen rbac:roleName=manager-role crd:allowDangerousTypes=true paths="./..." output:crd:artifacts:config=config/crd/bases
           controller-gen object:headerFile="hack/boilerplate.go.txt" paths="./..."
 
       - name: Check for uncommitted changes

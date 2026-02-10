@@ -28,9 +28,9 @@ import (
 
 func TestNewClient(t *testing.T) {
 	tests := []struct {
-		name           string
-		baseURLEnv     string
-		timeoutEnv     string
+		name            string
+		baseURLEnv      string
+		timeoutEnv      string
 		expectedBaseURL string
 		expectedTimeout time.Duration
 	}{

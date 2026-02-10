@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,7 +37,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"github.com/go-logr/logr"
 
 	cloudburstv1alpha1 "github.com/diegobraga/cloudburst-autoscaler/api/v1alpha1"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/bootstrap"
@@ -208,12 +208,12 @@ func (r *NodeClaimReconciler) handlePending(ctx context.Context, nodeClaim *clou
 	}
 
 	startupScriptConfig := bootstrap.StartupScriptConfig{
-		NodeName:                   nodeClaim.Name,
-		TailscaleAuthKey:           tailscaleAuthKey,
+		NodeName:                  nodeClaim.Name,
+		TailscaleAuthKey:          tailscaleAuthKey,
 		KubernetesVersion:         nodeClass.Spec.Bootstrap.KubernetesVersion,
 		JoinCommand:               joinCommand,
-		HostApiServer:              hostApiServer,
-		DiscoveryKubeconfigBase64:  discoveryKubeconfigBase64,
+		HostApiServer:             hostApiServer,
+		DiscoveryKubeconfigBase64: discoveryKubeconfigBase64,
 	}
 	startupScript := bootstrap.GenerateStartupScript(startupScriptConfig)
 
