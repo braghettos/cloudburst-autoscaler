@@ -1,0 +1,11 @@
+.git
+.github
+bin/
+hack/
+docs/
+config/
+*.md
+LICENSE
+.env*
+.gitignore
+.dockerignore

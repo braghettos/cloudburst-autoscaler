@@ -1,0 +1,11 @@
+resources:
+- manager.yaml
+# The following config is for teaching kustomize how to substitute name and namespace.
+# It will use the above manager.yaml as a base and substitute the IMG and NAMESPACE
+# variables.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Kustomization
+images:
+- name: controller
+  newName: controller
+  newTag: latest
