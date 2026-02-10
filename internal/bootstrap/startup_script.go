@@ -434,11 +434,11 @@ func GenerateStartupScript(config StartupScriptConfig) string {
 
 // StartupScriptConfig contains configuration for generating startup script
 type StartupScriptConfig struct {
-	NodeName                   string
-	TailscaleAuthKey           string
-	KubernetesVersion          string
-	JoinCommand                string
-	HostApiServer              string
+	NodeName          string
+	TailscaleAuthKey  string
+	KubernetesVersion string
+	JoinCommand       string
+	HostApiServer     string
 	// DiscoveryKubeconfigBase64 is optional: base64-encoded discovery kubeconfig (cluster-info) with server URL set to HostApiServer. If set, the VM skips fetching cluster-info over the network.
 	DiscoveryKubeconfigBase64 string
 }

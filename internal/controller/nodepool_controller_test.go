@@ -160,13 +160,13 @@ func TestNodePoolController_CreateNodeClaims(t *testing.T) {
 			GCP: cloudburstv1alpha1.GCPConfig{
 				Project:      "test-project",
 				Zone:         "europe-west1-a",
-				ImageFamily:   "ubuntu-2204-lts",
+				ImageFamily:  "ubuntu-2204-lts",
 				ImageProject: "ubuntu-os-cloud",
 			},
 			Join: cloudburstv1alpha1.JoinConfig{
-				HostApiServer:          "https://example.com:6443",
+				HostApiServer:             "https://example.com:6443",
 				KindControlPlaneContainer: "kind-control-plane",
-				TokenTtlMinutes:        30,
+				TokenTtlMinutes:           30,
 			},
 			Tailscale: cloudburstv1alpha1.TailscaleConfig{},
 		},
@@ -228,7 +228,7 @@ func TestNodePoolController_CreateNodeClaims(t *testing.T) {
 				{
 					Type:   corev1.PodScheduled,
 					Status: corev1.ConditionFalse,
-					Reason:  "Unschedulable",
+					Reason: "Unschedulable",
 				},
 			},
 		},

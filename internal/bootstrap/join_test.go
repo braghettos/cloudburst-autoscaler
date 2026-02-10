@@ -107,11 +107,11 @@ func TestNewJoinCommandProvider(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			provider := NewJoinCommandProvider(tt.containerName, tt.kindClusterName, tt.tokenTTL)
-			
+
 			if provider.containerName != tt.expectedName {
 				t.Errorf("expected container name %q, got %q", tt.expectedName, provider.containerName)
 			}
-			
+
 			if provider.tokenTTL != tt.expectedTTL {
 				t.Errorf("expected token TTL %d, got %d", tt.expectedTTL, provider.tokenTTL)
 			}

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,7 +32,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"github.com/go-logr/logr"
 
 	cloudburstv1alpha1 "github.com/diegobraga/cloudburst-autoscaler/api/v1alpha1"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/cloudbroker"
@@ -504,7 +504,7 @@ func (r *NodePoolReconciler) createNodeClaim(ctx context.Context, nodePool *clou
 
 	req := cloudbroker.RecommendationRequest{
 		MinVCPU:            minVCPU,
-		MinRAMGb:            minRAMGb,
+		MinRAMGb:           minRAMGb,
 		Arch:               arch,
 		RegionConstraint:   nodePool.Spec.Requirements.RegionConstraint,
 		MaxPriceEurPerHour: nodePool.Spec.Requirements.MaxPriceEurPerHour,
