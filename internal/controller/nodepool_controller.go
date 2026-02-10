@@ -384,7 +384,8 @@ func (r *NodePoolReconciler) calculateDesiredCapacity(ctx context.Context) (plan
 func (r *NodePoolReconciler) filterEligiblePods(pods []corev1.Pod) []corev1.Pod {
 	var eligible []corev1.Pod
 
-	for _, pod := range pods {
+	for i := range pods {
+		pod := &pods[i]
 		// Ignore kube-system namespace
 		if pod.Namespace == KubeSystemNamespace {
 			continue
@@ -414,7 +415,7 @@ func (r *NodePoolReconciler) filterEligiblePods(pods []corev1.Pod) []corev1.Pod 
 		}
 
 		if podScheduled {
-			eligible = append(eligible, pod)
+			eligible = append(eligible, *pod)
 		}
 	}
 
