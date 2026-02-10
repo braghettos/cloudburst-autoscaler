@@ -44,8 +44,8 @@ func (m *MockGCPProvisioner) DeleteInstance(ctx context.Context, instanceID stri
 
 func TestHandleDeleting_DeleteFlow(t *testing.T) {
 	scheme := runtime.NewScheme()
-	cloudburstv1alpha1.AddToScheme(scheme)
-	corev1.AddToScheme(scheme)
+	_ = cloudburstv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
 
 	tests := []struct {
 		name             string
@@ -165,7 +165,7 @@ func TestHandleDeleting_DeleteFlow(t *testing.T) {
 
 func TestCordonAndDrainNode(t *testing.T) {
 	scheme := runtime.NewScheme()
-	corev1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
 
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{

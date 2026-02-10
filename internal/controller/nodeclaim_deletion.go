@@ -141,7 +141,8 @@ func (r *NodeClaimReconciler) drainNode(ctx context.Context, nodeName string, lo
 	}
 
 	// Evict non-daemonset pods on this node
-	for _, pod := range podList.Items {
+	for i := range podList.Items {
+		pod := &podList.Items[i]
 		// Only process pods on this node
 		if pod.Spec.NodeName != nodeName {
 			continue
@@ -164,7 +165,7 @@ func (r *NodeClaimReconciler) drainNode(ctx context.Context, nodeName string, lo
 
 		// Delete pod (this will trigger eviction)
 		logger.Info("deleting pod for drain", "pod", pod.Name, "namespace", pod.Namespace)
-		if err := r.Delete(ctx, &pod, client.GracePeriodSeconds(int64(DrainGracePeriod.Seconds()))); err != nil {
+		if err := r.Delete(ctx, pod, client.GracePeriodSeconds(int64(DrainGracePeriod.Seconds()))); err != nil {
 			logger.Error(err, "failed to delete pod", "pod", pod.Name, "namespace", pod.Namespace)
 			// Continue with other pods
 		}

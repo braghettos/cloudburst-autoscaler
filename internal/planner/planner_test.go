@@ -188,7 +188,7 @@ func TestCalculateDesiredCapacityForPod(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cpuMilli, memBytes := CalculateDesiredCapacityForPod(tt.pod)
+			cpuMilli, memBytes := CalculateDesiredCapacityForPod(&tt.pod)
 			if cpuMilli != tt.expectedCPU {
 				t.Errorf("expected CPU %d millicores, got %d", tt.expectedCPU, cpuMilli)
 			}

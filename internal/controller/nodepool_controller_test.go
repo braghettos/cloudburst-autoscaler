@@ -89,7 +89,7 @@ func TestNodePoolController_CreateNodeClaims(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to start test environment: %v", err)
 	}
-	defer testEnv.Stop()
+	defer func() { _ = testEnv.Stop() }()
 
 	// Add our API types to the scheme
 	err = cloudburstv1alpha1.AddToScheme(scheme.Scheme)
@@ -148,7 +148,7 @@ func TestNodePoolController_CreateNodeClaims(t *testing.T) {
 	if err := k8sClient.Create(ctx, namespace); err != nil {
 		t.Fatalf("failed to create namespace: %v", err)
 	}
-	defer k8sClient.Delete(ctx, namespace)
+	defer func() { _ = k8sClient.Delete(ctx, namespace) }()
 
 	// Create NodeClass
 	nodeClass := &cloudburstv1alpha1.NodeClass{
@@ -202,7 +202,9 @@ func TestNodePoolController_CreateNodeClaims(t *testing.T) {
 		t.Fatalf("failed to create NodePool: %v", err)
 	}
 
-	// Create an unschedulable pod
+	// Create an unschedulable pod.
+	// Status must be set via a separate Status().Update() call because the
+	// API server ignores the status field during creation.
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-pod",
@@ -222,19 +224,24 @@ func TestNodePoolController_CreateNodeClaims(t *testing.T) {
 				},
 			},
 		},
-		Status: corev1.PodStatus{
-			Phase: corev1.PodPending,
-			Conditions: []corev1.PodCondition{
-				{
-					Type:   corev1.PodScheduled,
-					Status: corev1.ConditionFalse,
-					Reason: "Unschedulable",
-				},
-			},
-		},
 	}
 	if err := k8sClient.Create(ctx, pod); err != nil {
 		t.Fatalf("failed to create pod: %v", err)
+	}
+
+	// Set pod status to Pending + Unschedulable
+	pod.Status = corev1.PodStatus{
+		Phase: corev1.PodPending,
+		Conditions: []corev1.PodCondition{
+			{
+				Type:   corev1.PodScheduled,
+				Status: corev1.ConditionFalse,
+				Reason: "Unschedulable",
+			},
+		},
+	}
+	if err := k8sClient.Status().Update(ctx, pod); err != nil {
+		t.Fatalf("failed to update pod status: %v", err)
 	}
 
 	// Trigger reconciliation by updating NodePool
