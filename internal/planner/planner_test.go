@@ -1,0 +1,342 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package planner
+
+import (
+	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+func TestCalculateDesiredCapacityForPod(t *testing.T) {
+	tests := []struct {
+		name           string
+		pod            corev1.Pod
+		expectedCPU    int64
+		expectedMemory int64
+	}{
+		{
+			name: "single container with CPU and memory",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("100m"),
+									corev1.ResourceMemory: resource.MustParse("128Mi"),
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedCPU:    100,
+			expectedMemory: 134217728, // 128Mi in bytes
+		},
+		{
+			name: "multiple containers - sum resources",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("200m"),
+									corev1.ResourceMemory: resource.MustParse("256Mi"),
+								},
+							},
+						},
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("300m"),
+									corev1.ResourceMemory: resource.MustParse("512Mi"),
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedCPU:    500, // 200m + 300m
+			expectedMemory: 805306368, // 256Mi + 512Mi = 768Mi in bytes
+		},
+		{
+			name: "init container with higher requests",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("500m"),
+									corev1.ResourceMemory: resource.MustParse("1Gi"),
+								},
+							},
+						},
+					},
+					Containers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("200m"),
+									corev1.ResourceMemory: resource.MustParse("256Mi"),
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedCPU:    500, // max(500m init, 200m container) = 500m
+			expectedMemory: 1073741824, // max(1Gi init, 256Mi container) = 1Gi
+		},
+		{
+			name: "init container with lower requests than containers",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("100m"),
+									corev1.ResourceMemory: resource.MustParse("128Mi"),
+								},
+							},
+						},
+					},
+					Containers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("300m"),
+									corev1.ResourceMemory: resource.MustParse("512Mi"),
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedCPU:    300, // max(100m init, 300m container) = 300m
+			expectedMemory: 536870912, // max(128Mi init, 512Mi container) = 512Mi
+		},
+		{
+			name: "multiple init containers - take max",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("200m"),
+									corev1.ResourceMemory: resource.MustParse("256Mi"),
+								},
+							},
+						},
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("400m"),
+									corev1.ResourceMemory: resource.MustParse("512Mi"),
+								},
+							},
+						},
+					},
+					Containers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("100m"),
+									corev1.ResourceMemory: resource.MustParse("128Mi"),
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedCPU:    400, // max(200m, 400m init, 100m container) = 400m
+			expectedMemory: 536870912, // max(256Mi, 512Mi init, 128Mi container) = 512Mi
+		},
+		{
+			name: "pod with no resource requests",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{},
+					},
+				},
+			},
+			expectedCPU:    0,
+			expectedMemory: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cpuMilli, memBytes := CalculateDesiredCapacityForPod(tt.pod)
+			if cpuMilli != tt.expectedCPU {
+				t.Errorf("expected CPU %d millicores, got %d", tt.expectedCPU, cpuMilli)
+			}
+			if memBytes != tt.expectedMemory {
+				t.Errorf("expected Memory %d bytes, got %d", tt.expectedMemory, memBytes)
+			}
+		})
+	}
+}
+
+func TestCalculateDesiredCapacity(t *testing.T) {
+	tests := []struct {
+		name            string
+		pods            []corev1.Pod
+		expectedCPU     int64
+		expectedMemory  int64
+		expectedPodCount int
+	}{
+		{
+			name: "empty pod list",
+			pods: []corev1.Pod{},
+			expectedCPU:     0,
+			expectedMemory: 0,
+			expectedPodCount: 0,
+		},
+		{
+			name: "single pod",
+			pods: []corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "pod1"},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("100m"),
+										corev1.ResourceMemory: resource.MustParse("128Mi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedCPU:     100,
+			expectedMemory:  134217728,
+			expectedPodCount: 1,
+		},
+		{
+			name: "multiple pods - sum resources",
+			pods: []corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "pod1"},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("200m"),
+										corev1.ResourceMemory: resource.MustParse("256Mi"),
+									},
+								},
+							},
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "pod2"},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("300m"),
+										corev1.ResourceMemory: resource.MustParse("512Mi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedCPU:     500, // 200m + 300m
+			expectedMemory:  805306368, // 256Mi + 512Mi
+			expectedPodCount: 2,
+		},
+		{
+			name: "pods with init containers",
+			pods: []corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "pod1"},
+					Spec: corev1.PodSpec{
+						InitContainers: []corev1.Container{
+							{
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("500m"),
+										corev1.ResourceMemory: resource.MustParse("1Gi"),
+									},
+								},
+							},
+						},
+						Containers: []corev1.Container{
+							{
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("200m"),
+										corev1.ResourceMemory: resource.MustParse("256Mi"),
+									},
+								},
+							},
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "pod2"},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("100m"),
+										corev1.ResourceMemory: resource.MustParse("128Mi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedCPU:     600, // max(500m init, 200m container) + 100m = 500m + 100m
+			expectedMemory:  1207959552, // max(1Gi init, 256Mi container) + 128Mi = 1073741824 + 134217728
+			expectedPodCount: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			capacity := CalculateDesiredCapacity(tt.pods)
+			if capacity.CPUMilliTotal != tt.expectedCPU {
+				t.Errorf("expected CPU %d millicores, got %d", tt.expectedCPU, capacity.CPUMilliTotal)
+			}
+			if capacity.MemBytesTotal != tt.expectedMemory {
+				t.Errorf("expected Memory %d bytes, got %d", tt.expectedMemory, capacity.MemBytesTotal)
+			}
+			if capacity.PodCount != tt.expectedPodCount {
+				t.Errorf("expected PodCount %d, got %d", tt.expectedPodCount, capacity.PodCount)
+			}
+		})
+	}
+}

@@ -1,0 +1,11 @@
+namespace: cloudburst-system
+
+namePrefix: cloudburst-
+
+resources:
+- ../crd
+- ../rbac
+- ../manager
+
+patches:
+- path: crd_patch.yaml

@@ -1,0 +1,116 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/name: cloudburst-autoscaler
+    control-plane: controller-manager
+  name: system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-manager
+  namespace: system
+  labels:
+    app.kubernetes.io/name: cloudburst-autoscaler
+    control-plane: controller-manager
+spec:
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+  replicas: 1
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        control-plane: controller-manager
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+      - command:
+        - /manager
+        args:
+        - --leader-elect
+        image: controller:latest
+        name: manager
+        env:
+        - name: GCP_PROJECT
+          valueFrom:
+            configMapKeyRef:
+              name: controller-config
+              key: gcp-project
+              optional: true
+        - name: GCP_ZONE
+          valueFrom:
+            configMapKeyRef:
+              name: controller-config
+              key: gcp-zone
+              optional: true
+        - name: CLOUDBROKER_BASEURL
+          valueFrom:
+            configMapKeyRef:
+              name: controller-config
+              key: cloudbroker-baseurl
+              optional: true
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: /var/run/secrets/gcp/credentials.json
+        - name: TAILSCALE_AUTHKEY
+          valueFrom:
+            secretKeyRef:
+              name: tailscale-auth
+              key: authkey
+              optional: true
+        volumeMounts:
+        - name: gcp-credentials
+          mountPath: /var/run/secrets/gcp
+          readOnly: true
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        ports:
+        - containerPort: 8080
+          name: metrics
+          protocol: TCP
+        - containerPort: 8081
+          name: health
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 128Mi
+      serviceAccountName: controller-manager
+      terminationGracePeriodSeconds: 10
+      volumes:
+      - name: gcp-credentials
+        secret:
+          secretName: gcp-credentials
+          optional: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: controller-manager
+  namespace: system
+  labels:
+    app.kubernetes.io/name: cloudburst-autoscaler
+    control-plane: controller-manager

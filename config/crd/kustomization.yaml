@@ -1,0 +1,4 @@
+resources:
+- bases/cloudburst.io_nodepools.yaml
+- bases/cloudburst.io_nodeclasses.yaml
+- bases/cloudburst.io_nodeclaims.yaml

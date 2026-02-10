@@ -1,0 +1,614 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"github.com/go-logr/logr"
+
+	cloudburstv1alpha1 "github.com/diegobraga/cloudburst-autoscaler/api/v1alpha1"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/cloudbroker"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/planner"
+)
+
+const (
+	// DefaultMinNodes is the default minimum number of nodes when NodePool.Spec.Limits.MinNodes is unset
+	DefaultMinNodes = 1
+	// DefaultMinVCPU is the default minimum vCPU per node when NodePool.Spec.Requirements.MinVCPU is unset
+	DefaultMinVCPU = 2
+	// DefaultMinRAMGb is the default minimum RAM per node in GB when NodePool.Spec.Requirements.MinRAMGb is unset
+	DefaultMinRAMGb = 8.0
+)
+
+// NodePoolReconciler reconciles a NodePool object.
+//
+// Concept of NodePool: a pool of nodes that share the same constraints (region, arch, price, providers),
+// limits (min/max nodes), per-node capacity (MinVCPU, MinRAMGb), template (labels/taints), and disruption
+// policy. The controller creates NodeClaims when unschedulable pod demand exceeds current capacity,
+// using NodePool.Requirements to decide how many nodes are needed and what to ask CloudBroker for.
+type NodePoolReconciler struct {
+	client.Client
+	Scheme      *runtime.Scheme
+	CloudBroker *cloudbroker.Client
+	Recorder    record.EventRecorder
+}
+
+//+kubebuilder:rbac:groups=cloudburst.io,resources=nodepools,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=cloudburst.io,resources=nodepools/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=cloudburst.io,resources=nodepools/finalizers,verbs=update
+//+kubebuilder:rbac:groups=cloudburst.io,resources=nodeclaims,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=cloudburst.io,resources=nodeclaims/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;patch;delete
+//+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+
+// Reconcile reconciles NodePool and creates NodeClaims when needed
+func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	logger := log.FromContext(ctx).WithValues("nodepool", req.NamespacedName)
+
+	// Fetch NodePool
+	nodePool := &cloudburstv1alpha1.NodePool{}
+	if err := r.Get(ctx, req.NamespacedName, nodePool); err != nil {
+		if errors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		logger.Error(err, "unable to fetch NodePool")
+		return ctrl.Result{}, err
+	}
+
+	// Calculate desired capacity from unschedulable pods
+	desiredCapacity, err := r.calculateDesiredCapacity(ctx)
+	if err != nil {
+		logger.Error(err, "unable to calculate desired capacity")
+		return ctrl.Result{}, err
+	}
+
+	// Size the next node to fit current unschedulable demand so we create one node that
+	// accommodates the pod(s), rather than multiple small nodes from a fixed pool size.
+	// We need 1 node when there is demand; that node will be requested with min vCPU/RAM
+	// derived from desiredCapacity (NodePool.MinVCPU/MinRAMGb are the floor).
+	nodesNeeded := int32(0)
+	if desiredCapacity.CPUMilliTotal > 0 || desiredCapacity.MemBytesTotal > 0 {
+		nodesNeeded = 1
+	}
+
+	logger.Info("calculated nodes needed",
+		"desiredCapacity", desiredCapacity,
+		"nodesNeeded", nodesNeeded,
+	)
+
+	// Count active NodeClaims for this NodePool
+	activeCount, err := r.countActiveNodeClaims(ctx, req.Namespace, req.Name)
+	if err != nil {
+		logger.Error(err, "unable to count active NodeClaims")
+		return ctrl.Result{}, err
+	}
+
+	logger.Info("node claim status",
+		"activeCount", activeCount,
+		"nodesNeeded", nodesNeeded,
+	)
+
+	// Check for scale-down opportunities
+	if err := r.checkScaleDown(ctx, nodePool, logger); err != nil {
+		logger.Error(err, "error checking scale-down")
+		// Don't fail reconciliation on scale-down errors
+	}
+
+	// Create NodeClaims if needed. Create at most one per reconcile so that when the
+	// controller is re-enqueued by Owns(NodeClaim) after Create(), the next reconcile
+	// sees updated activeCount (or we create one more); avoids creating nodesNeeded
+	// copies when the cache is still stale and activeCount appears 0.
+	if nodesNeeded > activeCount {
+		nodesToCreate := nodesNeeded - activeCount
+		if nodesToCreate > 1 {
+			nodesToCreate = 1
+		}
+		logger.Info("creating node claims",
+			"nodesToCreate", nodesToCreate,
+			"nodePool", req.Name,
+		)
+
+		// Get NodeClass (required for creating NodeClaims)
+		nodeClassList := &cloudburstv1alpha1.NodeClassList{}
+		if err := r.List(ctx, nodeClassList, client.InNamespace(req.Namespace)); err != nil {
+			logger.Error(err, "unable to list NodeClasses")
+			return ctrl.Result{}, err
+		}
+
+		if len(nodeClassList.Items) == 0 {
+			logger.Info("no NodeClass found, skipping NodeClaim creation")
+			r.recordEvent(nodePool, corev1.EventTypeWarning, "NoNodeClass", "No NodeClass found in namespace")
+			return ctrl.Result{}, nil
+		}
+
+		nodeClass := nodeClassList.Items[0] // Use first NodeClass found
+
+		// Create NodeClaims
+		for i := int32(0); i < nodesToCreate; i++ {
+			if err := r.createNodeClaim(ctx, nodePool, &nodeClass, desiredCapacity); err != nil {
+				logger.Error(err, "unable to create NodeClaim", "index", i)
+				r.recordEvent(nodePool, corev1.EventTypeWarning, "NodeClaimCreationFailed", fmt.Sprintf("Failed to create NodeClaim: %v", err))
+				continue
+			}
+		}
+
+		r.recordEvent(nodePool, corev1.EventTypeNormal, "NodeClaimsCreated", fmt.Sprintf("Created %d NodeClaim(s)", nodesToCreate))
+		// Requeue so next reconciliation sees updated activeCount. Use a delay so the informer
+		// cache is likely to include the new NodeClaim(s) before we consider creating more.
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+	}
+
+	// When there are active NodeClaims but no demand, requeue periodically so
+	// checkScaleDown can detect empty nodes once pods finish terminating.
+	// Without this, the reconciler would stop after the last pod event and
+	// never revisit the TTL-after-empty check.
+	if activeCount > 0 {
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	return ctrl.Result{}, nil
+}
+
+// checkScaleDown checks for nodes that should be deleted based on disruption settings
+func (r *NodePoolReconciler) checkScaleDown(ctx context.Context, nodePool *cloudburstv1alpha1.NodePool, logger logr.Logger) error {
+	// List all NodeClaims for this NodePool
+	nodeClaimList := &cloudburstv1alpha1.NodeClaimList{}
+	if err := r.List(ctx, nodeClaimList, client.InNamespace(nodePool.Namespace)); err != nil {
+		return fmt.Errorf("unable to list NodeClaims: %w", err)
+	}
+
+	// Filter Ready NodeClaims for this NodePool
+	var readyNodeClaims []cloudburstv1alpha1.NodeClaim
+	for i := range nodeClaimList.Items {
+		claim := &nodeClaimList.Items[i]
+		if claim.Spec.NodePoolRef != nodePool.Name {
+			continue
+		}
+		if claim.Status.Phase == cloudburstv1alpha1.NodeClaimPhaseReady {
+			readyNodeClaims = append(readyNodeClaims, *claim)
+		}
+	}
+
+	// Safety guard: never delete if fewer than minNodes remain
+	minNodes := DefaultMinNodes
+	if nodePool.Spec.Limits.MinNodes != nil {
+		minNodes = int(*nodePool.Spec.Limits.MinNodes)
+		if minNodes < 0 {
+			minNodes = 0
+		}
+	}
+	if len(readyNodeClaims) <= minNodes {
+		logger.Info("skipping scale-down: minimum node count reached",
+			"readyCount", len(readyNodeClaims),
+			"minNodes", minNodes,
+		)
+		return nil
+	}
+
+	// Check max spend guard (optional)
+	if err := r.checkMaxSpend(ctx, nodePool, readyNodeClaims, logger); err != nil {
+		logger.Info("skipping scale-down: max spend check failed", "error", err)
+		// Continue with other checks even if max spend check fails
+	}
+
+	now := time.Now()
+
+	// Check each Ready NodeClaim for disruption conditions
+	for i := range readyNodeClaims {
+		claim := &readyNodeClaims[i]
+
+		// Fetch latest version to ensure we have the current state
+		latestClaim := &cloudburstv1alpha1.NodeClaim{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(claim), latestClaim); err != nil {
+			logger.Error(err, "unable to fetch latest NodeClaim", "nodeClaim", claim.Name)
+			continue
+		}
+
+		// Check ttlSecondsUntilExpired
+		if nodePool.Spec.Disruption.TTLSecondsUntilExpired > 0 {
+			if latestClaim.Status.Timestamps.ReadyAt != nil {
+				age := now.Sub(latestClaim.Status.Timestamps.ReadyAt.Time)
+				if age >= time.Duration(nodePool.Spec.Disruption.TTLSecondsUntilExpired)*time.Second {
+					logger.Info("node expired, initiating deletion",
+						"nodeClaim", latestClaim.Name,
+						"age", age,
+						"ttl", nodePool.Spec.Disruption.TTLSecondsUntilExpired,
+					)
+					r.recordEvent(nodePool, corev1.EventTypeNormal, "NodeExpired", fmt.Sprintf("NodeClaim %s expired (age: %v)", latestClaim.Name, age))
+					if err := r.initiateDeletion(ctx, latestClaim, logger); err != nil {
+						logger.Error(err, "failed to initiate deletion", "nodeClaim", latestClaim.Name)
+						continue
+					}
+					continue
+				}
+			}
+		}
+
+		// Check ttlSecondsAfterEmpty (optional, can be skipped)
+		if nodePool.Spec.Disruption.TTLSecondsAfterEmpty > 0 {
+			isEmpty, err := r.isNodeEmpty(ctx, latestClaim, logger)
+			if err != nil {
+				logger.Error(err, "unable to check if node is empty", "nodeClaim", latestClaim.Name)
+				continue
+			}
+
+			if isEmpty {
+				// Check when node became empty (we'd need to track this, but for MVP we can use ReadyAt)
+				// For MVP, we'll check if node has been empty for the TTL duration
+				// This is simplified - in production you'd track when node became empty
+				if latestClaim.Status.Timestamps.ReadyAt != nil {
+					age := now.Sub(latestClaim.Status.Timestamps.ReadyAt.Time)
+					if age >= time.Duration(nodePool.Spec.Disruption.TTLSecondsAfterEmpty)*time.Second {
+						logger.Info("node empty for TTL, initiating deletion",
+							"nodeClaim", latestClaim.Name,
+							"age", age,
+							"ttl", nodePool.Spec.Disruption.TTLSecondsAfterEmpty,
+						)
+						r.recordEvent(nodePool, corev1.EventTypeNormal, "NodeEmpty", fmt.Sprintf("NodeClaim %s empty for TTL (age: %v)", latestClaim.Name, age))
+						if err := r.initiateDeletion(ctx, latestClaim, logger); err != nil {
+							logger.Error(err, "failed to initiate deletion", "nodeClaim", latestClaim.Name)
+							continue
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// checkMaxSpend checks if total spend exceeds NodePool limits
+func (r *NodePoolReconciler) checkMaxSpend(ctx context.Context, nodePool *cloudburstv1alpha1.NodePool, nodeClaims []cloudburstv1alpha1.NodeClaim, logger logr.Logger) error {
+	// Calculate total spend
+	var totalSpend float64
+	for _, claim := range nodeClaims {
+		totalSpend += claim.Spec.Chosen.PriceEurPerHour
+	}
+
+	// Check against limits (if maxPriceEurPerHour is set per node, we'd need to check differently)
+	// For MVP, we'll skip this check as it's optional
+	logger.Info("max spend check",
+		"totalSpend", totalSpend,
+		"nodeCount", len(nodeClaims),
+	)
+
+	return nil
+}
+
+// isNodeEmpty checks if a node has no non-daemonset pods
+func (r *NodePoolReconciler) isNodeEmpty(ctx context.Context, nodeClaim *cloudburstv1alpha1.NodeClaim, logger logr.Logger) (bool, error) {
+	if nodeClaim.Status.NodeName == "" {
+		return false, nil
+	}
+
+	// List all pods
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList); err != nil {
+		return false, fmt.Errorf("unable to list pods: %w", err)
+	}
+
+	// Check for pods on this node
+	for _, pod := range podList.Items {
+		if pod.Spec.NodeName != nodeClaim.Status.NodeName {
+			continue
+		}
+
+		// Skip daemonset pods
+		isDaemonSet := false
+		if pod.OwnerReferences != nil {
+			for _, owner := range pod.OwnerReferences {
+				if owner.Kind == "DaemonSet" {
+					isDaemonSet = true
+					break
+				}
+			}
+		}
+		if isDaemonSet {
+			continue
+		}
+
+		// Found a non-daemonset pod
+		return false, nil
+	}
+
+	return true, nil
+}
+
+// initiateDeletion initiates the deletion flow for a NodeClaim
+func (r *NodePoolReconciler) initiateDeletion(ctx context.Context, nodeClaim *cloudburstv1alpha1.NodeClaim, logger logr.Logger) error {
+	// Fetch latest version
+	latestClaim := &cloudburstv1alpha1.NodeClaim{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(nodeClaim), latestClaim); err != nil {
+		return fmt.Errorf("failed to get latest NodeClaim: %w", err)
+	}
+
+	// Update NodeClaim phase to Deleting
+	latestClaim.Status.Phase = cloudburstv1alpha1.NodeClaimPhaseDeleting
+	latestClaim.Status.Timestamps.LastTransition = metav1.Now()
+	if err := r.Status().Update(ctx, latestClaim); err != nil {
+		return fmt.Errorf("failed to update NodeClaim phase: %w", err)
+	}
+
+	logger.Info("initiated deletion", "nodeClaim", latestClaim.Name)
+	r.recordEvent(latestClaim, corev1.EventTypeNormal, "DeletionInitiated", "NodeClaim deletion initiated")
+
+	return nil
+}
+
+// calculateDesiredCapacity calculates desired capacity from unschedulable pods
+func (r *NodePoolReconciler) calculateDesiredCapacity(ctx context.Context) (planner.DesiredCapacity, error) {
+	// List all pods
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList); err != nil {
+		return planner.DesiredCapacity{}, err
+	}
+
+	// Filter eligible pods (same logic as DemandDetector)
+	eligiblePods := r.filterEligiblePods(podList.Items)
+
+	// Calculate desired capacity
+	return planner.CalculateDesiredCapacity(eligiblePods), nil
+}
+
+// filterEligiblePods filters pods that are eligible for demand detection
+func (r *NodePoolReconciler) filterEligiblePods(pods []corev1.Pod) []corev1.Pod {
+	var eligible []corev1.Pod
+
+	for _, pod := range pods {
+		// Ignore kube-system namespace
+		if pod.Namespace == KubeSystemNamespace {
+			continue
+		}
+
+		// Ignore pods with cloudburst.io/ignore=true annotation
+		if pod.Annotations != nil {
+			if pod.Annotations[IgnoreAnnotation] == "true" {
+				continue
+			}
+		}
+
+		// Check if pod is Pending
+		if pod.Status.Phase != corev1.PodPending {
+			continue
+		}
+
+		// Check if PodScheduled condition is False with reason "Unschedulable"
+		podScheduled := false
+		for _, condition := range pod.Status.Conditions {
+			if condition.Type == corev1.PodScheduled {
+				if condition.Status == corev1.ConditionFalse && condition.Reason == "Unschedulable" {
+					podScheduled = true
+					break
+				}
+			}
+		}
+
+		if podScheduled {
+			eligible = append(eligible, pod)
+		}
+	}
+
+	return eligible
+}
+
+// countActiveNodeClaims counts NodeClaims in active phases
+func (r *NodePoolReconciler) countActiveNodeClaims(ctx context.Context, namespace, nodePoolName string) (int32, error) {
+	nodeClaimList := &cloudburstv1alpha1.NodeClaimList{}
+	if err := r.List(ctx, nodeClaimList, client.InNamespace(namespace)); err != nil {
+		return 0, err
+	}
+
+	count := int32(0)
+	for _, claim := range nodeClaimList.Items {
+		// Check if this NodeClaim belongs to this NodePool
+		if claim.Spec.NodePoolRef != nodePoolName {
+			continue
+		}
+
+		// Count only active phases
+		phase := claim.Status.Phase
+		if phase == cloudburstv1alpha1.NodeClaimPhasePending ||
+			phase == cloudburstv1alpha1.NodeClaimPhaseProvisioning ||
+			phase == cloudburstv1alpha1.NodeClaimPhaseJoining ||
+			phase == cloudburstv1alpha1.NodeClaimPhaseReady {
+			count++
+		}
+	}
+
+	return count, nil
+}
+
+// getMinVCPUFromNodePool returns the minimum vCPU per node for this pool (from spec or default).
+func getMinVCPUFromNodePool(nodePool *cloudburstv1alpha1.NodePool) int32 {
+	if nodePool.Spec.Requirements.MinVCPU != nil && *nodePool.Spec.Requirements.MinVCPU > 0 {
+		return *nodePool.Spec.Requirements.MinVCPU
+	}
+	return DefaultMinVCPU
+}
+
+// getMinRAMGbFromNodePool returns the minimum RAM per node in GB for this pool (from spec or default).
+func getMinRAMGbFromNodePool(nodePool *cloudburstv1alpha1.NodePool) float64 {
+	if nodePool.Spec.Requirements.MinRAMGb != nil && *nodePool.Spec.Requirements.MinRAMGb > 0 {
+		return *nodePool.Spec.Requirements.MinRAMGb
+	}
+	return DefaultMinRAMGb
+}
+
+// vcpuFromDemand returns the minimum vCPU to request for a node that fits the demand; poolMin is the NodePool floor.
+func vcpuFromDemand(cpuMilli int64, poolMin int32) int32 {
+	need := int32((cpuMilli + 999) / 1000)
+	if need < 1 {
+		need = 1
+	}
+	if poolMin > need {
+		return poolMin
+	}
+	return need
+}
+
+// ramGbFromDemand returns the minimum RAM in GB to request for a node that fits the demand; poolMin is the NodePool floor.
+func ramGbFromDemand(memBytes int64, poolMin float64) float64 {
+	const bytesPerGb = 1024 * 1024 * 1024
+	needGb := float64((memBytes + bytesPerGb - 1) / bytesPerGb)
+	if needGb < 1 {
+		needGb = 1
+	}
+	if poolMin > needGb {
+		return poolMin
+	}
+	return needGb
+}
+
+// createNodeClaim creates a new NodeClaim with recommendation from CloudBroker
+func (r *NodePoolReconciler) createNodeClaim(ctx context.Context, nodePool *cloudburstv1alpha1.NodePool, nodeClass *cloudburstv1alpha1.NodeClass, desiredCapacity planner.DesiredCapacity) error {
+	logger := log.FromContext(ctx)
+
+	// Prepare CloudBroker request
+	arch := "x86_64" // default
+	if len(nodePool.Spec.Requirements.Arch) > 0 {
+		arch = nodePool.Spec.Requirements.Arch[0] // Use first arch
+	}
+
+	// Size the node to fit current unschedulable demand; NodePool min is the floor
+	minVCPU := vcpuFromDemand(desiredCapacity.CPUMilliTotal, getMinVCPUFromNodePool(nodePool))
+	minRAMGb := ramGbFromDemand(desiredCapacity.MemBytesTotal, getMinRAMGbFromNodePool(nodePool))
+
+	req := cloudbroker.RecommendationRequest{
+		MinVCPU:            minVCPU,
+		MinRAMGb:            minRAMGb,
+		Arch:               arch,
+		RegionConstraint:   nodePool.Spec.Requirements.RegionConstraint,
+		MaxPriceEurPerHour: nodePool.Spec.Requirements.MaxPriceEurPerHour,
+		Limit:              10,
+	}
+	if len(nodePool.Spec.Requirements.AllowedProviders) > 0 {
+		req.AllowedProviders = nodePool.Spec.Requirements.AllowedProviders
+	}
+
+	// Get recommendation from CloudBroker (required)
+	recommendation, err := r.CloudBroker.Recommend(ctx, req)
+	if err != nil {
+		return fmt.Errorf("failed to get recommendation from CloudBroker: %w", err)
+	}
+	if recommendation == nil {
+		return fmt.Errorf("CloudBroker returned nil recommendation")
+	}
+	if recommendation.Provider != "gcp" {
+		return fmt.Errorf("recommendation provider is %q, only gcp is supported", recommendation.Provider)
+	}
+
+	// Create NodeClaim
+	// Naming standard: cb-<nodepool>-<k8s-suffix>
+	// The NodeClaim name becomes the K8s node name AND the GCP instance name,
+	// so all three are identical for easy correlation during debugging.
+	// Truncate NodePool name so total stays within GCP's 63-char limit:
+	//   "cb-" (3) + nodepool (max 53) + "-" (1) + k8s-suffix (5) = 62 chars
+	truncatedPoolName := nodePool.Name
+	if len(truncatedPoolName) > 53 {
+		truncatedPoolName = truncatedPoolName[:53]
+	}
+	nodeClaim := &cloudburstv1alpha1.NodeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: fmt.Sprintf("cb-%s-", truncatedPoolName),
+			Namespace:    nodePool.Namespace,
+			Labels: map[string]string{
+				"cloudburst.io/nodepool": nodePool.Name,
+			},
+		},
+		Spec: cloudburstv1alpha1.NodeClaimSpec{
+			NodePoolRef:  nodePool.Name,
+			NodeClassRef: nodeClass.Name,
+			Chosen: cloudburstv1alpha1.InstanceDetails{
+				Provider:        recommendation.Provider,
+				Region:          recommendation.Region,
+				InstanceType:    recommendation.InstanceType,
+				VCPU:            recommendation.VCPU,
+				RamGb:           recommendation.RAMGb,
+				PriceEurPerHour: recommendation.PriceEurPerHour,
+			},
+		},
+		Status: cloudburstv1alpha1.NodeClaimStatus{
+			Phase: cloudburstv1alpha1.NodeClaimPhasePending,
+			Timestamps: cloudburstv1alpha1.NodeClaimTimestamps{
+				CreatedAt:      metav1.Now(),
+				LastTransition: metav1.Now(),
+			},
+		},
+	}
+
+	if err := r.Create(ctx, nodeClaim); err != nil {
+		return fmt.Errorf("failed to create NodeClaim: %w", err)
+	}
+
+	logger.Info("created NodeClaim",
+		"nodeClaim", nodeClaim.Name,
+		"provider", recommendation.Provider,
+		"region", recommendation.Region,
+		"instanceType", recommendation.InstanceType,
+	)
+
+	return nil
+}
+
+// recordEvent records an event for the NodePool
+func (r *NodePoolReconciler) recordEvent(obj client.Object, eventType, reason, message string) {
+	if r.Recorder != nil {
+		r.Recorder.Event(obj, eventType, reason, message)
+	}
+}
+
+// SetupWithManager sets up the controller with the Manager.
+func (r *NodePoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&cloudburstv1alpha1.NodePool{}).
+		Owns(&cloudburstv1alpha1.NodeClaim{}).
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.enqueueNodePoolsForPod)).
+		Complete(r)
+}
+
+// enqueueNodePoolsForPod enqueues all NodePools in the same namespace as the pod,
+// so that demand from unschedulable pods triggers scale-up.
+func (r *NodePoolReconciler) enqueueNodePoolsForPod(ctx context.Context, obj client.Object) []reconcile.Request {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		return nil
+	}
+	list := &cloudburstv1alpha1.NodePoolList{}
+	if err := r.List(ctx, list, client.InNamespace(pod.Namespace)); err != nil {
+		return nil
+	}
+	reqs := make([]reconcile.Request, 0, len(list.Items))
+	for i := range list.Items {
+		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+	}
+	return reqs
+}
