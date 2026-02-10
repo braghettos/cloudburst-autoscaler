@@ -290,8 +290,8 @@ func (r *NodePoolReconciler) checkScaleDown(ctx context.Context, nodePool *cloud
 func (r *NodePoolReconciler) checkMaxSpend(ctx context.Context, nodePool *cloudburstv1alpha1.NodePool, nodeClaims []cloudburstv1alpha1.NodeClaim, logger logr.Logger) error {
 	// Calculate total spend
 	var totalSpend float64
-	for _, claim := range nodeClaims {
-		totalSpend += claim.Spec.Chosen.PriceEurPerHour
+	for i := range nodeClaims {
+		totalSpend += nodeClaims[i].Spec.Chosen.PriceEurPerHour
 	}
 
 	// Check against limits (if maxPriceEurPerHour is set per node, we'd need to check differently)
@@ -317,7 +317,8 @@ func (r *NodePoolReconciler) isNodeEmpty(ctx context.Context, nodeClaim *cloudbu
 	}
 
 	// Check for pods on this node
-	for _, pod := range podList.Items {
+	for i := range podList.Items {
+		pod := &podList.Items[i]
 		if pod.Spec.NodeName != nodeClaim.Status.NodeName {
 			continue
 		}
@@ -428,7 +429,8 @@ func (r *NodePoolReconciler) countActiveNodeClaims(ctx context.Context, namespac
 	}
 
 	count := int32(0)
-	for _, claim := range nodeClaimList.Items {
+	for i := range nodeClaimList.Items {
+		claim := &nodeClaimList.Items[i]
 		// Check if this NodeClaim belongs to this NodePool
 		if claim.Spec.NodePoolRef != nodePoolName {
 			continue
@@ -515,7 +517,7 @@ func (r *NodePoolReconciler) createNodeClaim(ctx context.Context, nodePool *clou
 	}
 
 	// Get recommendation from CloudBroker (required)
-	recommendation, err := r.CloudBroker.Recommend(ctx, req)
+	recommendation, err := r.CloudBroker.Recommend(ctx, &req)
 	if err != nil {
 		return fmt.Errorf("failed to get recommendation from CloudBroker: %w", err)
 	}

@@ -7,93 +7,20 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - secrets
+  - events
   verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - delete
   - get
   - list
+  - patch
   - watch
-  - create
-  - update
-  - patch
-  - delete
-- apiGroups:
-  - cloudburst.io
-  resources:
-  - nodepools
-  verbs:
-  - get
-  - list
-  - watch
-  - create
-  - update
-  - patch
-  - delete
-- apiGroups:
-  - cloudburst.io
-  resources:
-  - nodepools/status
-  verbs:
-  - get
-  - update
-  - patch
-- apiGroups:
-  - cloudburst.io
-  resources:
-  - nodepools/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - cloudburst.io
-  resources:
-  - nodeclasses
-  verbs:
-  - get
-  - list
-  - watch
-  - create
-  - update
-  - patch
-  - delete
-- apiGroups:
-  - cloudburst.io
-  resources:
-  - nodeclasses/status
-  verbs:
-  - get
-  - update
-  - patch
-- apiGroups:
-  - cloudburst.io
-  resources:
-  - nodeclasses/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - cloudburst.io
-  resources:
-  - nodeclaims
-  verbs:
-  - get
-  - list
-  - watch
-  - create
-  - update
-  - patch
-  - delete
-- apiGroups:
-  - cloudburst.io
-  resources:
-  - nodeclaims/status
-  verbs:
-  - get
-  - update
-  - patch
-- apiGroups:
-  - cloudburst.io
-  resources:
-  - nodeclaims/finalizers
-  verbs:
-  - update
 - apiGroups:
   - ""
   resources:
@@ -105,33 +32,41 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - pods/exec
+  - secrets
   verbs:
   - create
-- apiGroups:
-  - ""
-  resources:
-  - nodes
-  verbs:
   - get
   - list
   - watch
+- apiGroups:
+  - cloudburst.io
+  resources:
+  - nodeclaims
+  - nodeclasses
+  - nodepools
+  verbs:
   - create
-  - update
-  - patch
   - delete
-- apiGroups:
-  - ""
-  resources:
-  - configmaps
-  verbs:
   - get
   - list
+  - patch
+  - update
   - watch
 - apiGroups:
-  - ""
+  - cloudburst.io
   resources:
-  - events
+  - nodeclaims/finalizers
+  - nodeclasses/finalizers
+  - nodepools/finalizers
   verbs:
-  - create
+  - update
+- apiGroups:
+  - cloudburst.io
+  resources:
+  - nodeclaims/status
+  - nodeclasses/status
+  - nodepools/status
+  verbs:
+  - get
   - patch
+  - update

@@ -168,7 +168,7 @@ func TestRecommend_Success(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(response)
+		_ = json.NewEncoder(w).Encode(response)
 	}))
 	defer server.Close()
 
@@ -188,7 +188,7 @@ func TestRecommend_Success(t *testing.T) {
 		Limit:              10,
 	}
 
-	result, err := client.Recommend(context.Background(), req)
+	result, err := client.Recommend(context.Background(), &req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestRecommend_NoRecommendations(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(response)
+		_ = json.NewEncoder(w).Encode(response)
 	}))
 	defer server.Close()
 
@@ -240,7 +240,7 @@ func TestRecommend_NoRecommendations(t *testing.T) {
 		Limit:              10,
 	}
 
-	_, err := client.Recommend(context.Background(), req)
+	_, err := client.Recommend(context.Background(), &req)
 	if err == nil {
 		t.Fatal("expected error for empty recommendations, got nil")
 	}
@@ -253,7 +253,7 @@ func TestRecommend_HTTPError(t *testing.T) {
 	// Create test server returning error status
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("internal server error"))
+		_, _ = w.Write([]byte("internal server error"))
 	}))
 	defer server.Close()
 
@@ -271,7 +271,7 @@ func TestRecommend_HTTPError(t *testing.T) {
 		Limit:              10,
 	}
 
-	_, err := client.Recommend(context.Background(), req)
+	_, err := client.Recommend(context.Background(), &req)
 	if err == nil {
 		t.Fatal("expected error for HTTP 500, got nil")
 	}
@@ -288,7 +288,7 @@ func TestRecommend_RetryOnFailure(t *testing.T) {
 		attemptCount++
 		if attemptCount < 2 {
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte("temporary error"))
+			_, _ = w.Write([]byte("temporary error"))
 			return
 		}
 
@@ -306,7 +306,7 @@ func TestRecommend_RetryOnFailure(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(response)
+		_ = json.NewEncoder(w).Encode(response)
 	}))
 	defer server.Close()
 
@@ -324,7 +324,7 @@ func TestRecommend_RetryOnFailure(t *testing.T) {
 		Limit:              10,
 	}
 
-	result, err := client.Recommend(context.Background(), req)
+	result, err := client.Recommend(context.Background(), &req)
 	if err != nil {
 		t.Fatalf("unexpected error after retry: %v", err)
 	}
@@ -343,7 +343,7 @@ func TestRecommend_InvalidJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("invalid json"))
+		_, _ = w.Write([]byte("invalid json"))
 	}))
 	defer server.Close()
 
@@ -361,7 +361,7 @@ func TestRecommend_InvalidJSON(t *testing.T) {
 		Limit:              10,
 	}
 
-	_, err := client.Recommend(context.Background(), req)
+	_, err := client.Recommend(context.Background(), &req)
 	if err == nil {
 		t.Fatal("expected error for invalid JSON, got nil")
 	}
@@ -406,7 +406,7 @@ func TestRecommend_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
 
-	_, err := client.Recommend(ctx, req)
+	_, err := client.Recommend(ctx, &req)
 	if err == nil {
 		t.Fatal("expected error for cancelled context, got nil")
 	}

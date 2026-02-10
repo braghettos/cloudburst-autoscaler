@@ -36,8 +36,8 @@ func CalculateDesiredCapacity(pods []corev1.Pod) DesiredCapacity {
 		PodCount: len(pods),
 	}
 
-	for _, pod := range pods {
-		cpuMilli, memBytes := CalculateDesiredCapacityForPod(pod)
+	for i := range pods {
+		cpuMilli, memBytes := CalculateDesiredCapacityForPod(&pods[i])
 		capacity.CPUMilliTotal += cpuMilli
 		capacity.MemBytesTotal += memBytes
 	}
@@ -49,12 +49,13 @@ func CalculateDesiredCapacity(pods []corev1.Pod) DesiredCapacity {
 // This properly handles init containers by taking the maximum of:
 // - Maximum init container request (init containers run sequentially)
 // - Sum of regular container requests (regular containers run concurrently)
-func CalculateDesiredCapacityForPod(pod corev1.Pod) (cpuMilli int64, memBytes int64) {
+func CalculateDesiredCapacityForPod(pod *corev1.Pod) (cpuMilli int64, memBytes int64) {
 	var maxInitCPU int64
 	var maxInitMemory int64
 
 	// Find maximum init container requests (init containers run sequentially)
-	for _, container := range pod.Spec.InitContainers {
+	for i := range pod.Spec.InitContainers {
+		container := &pod.Spec.InitContainers[i]
 		if cpu, ok := container.Resources.Requests[corev1.ResourceCPU]; ok {
 			if cpu.MilliValue() > maxInitCPU {
 				maxInitCPU = cpu.MilliValue()
@@ -70,7 +71,8 @@ func CalculateDesiredCapacityForPod(pod corev1.Pod) (cpuMilli int64, memBytes in
 	// Sum regular container requests (regular containers run concurrently)
 	var sumCPU int64
 	var sumMemory int64
-	for _, container := range pod.Spec.Containers {
+	for i := range pod.Spec.Containers {
+		container := &pod.Spec.Containers[i]
 		if cpu, ok := container.Resources.Requests[corev1.ResourceCPU]; ok {
 			sumCPU += cpu.MilliValue()
 		}

@@ -104,7 +104,7 @@ func NewClient() *Client {
 }
 
 // Recommend requests instance recommendations and returns the top recommendation
-func (c *Client) Recommend(ctx context.Context, req RecommendationRequest) (*RecommendationResult, error) {
+func (c *Client) Recommend(ctx context.Context, req *RecommendationRequest) (*RecommendationResult, error) {
 	var lastErr error
 
 	for attempt := 0; attempt <= MaxRetries; attempt++ {
@@ -130,7 +130,7 @@ func (c *Client) Recommend(ctx context.Context, req RecommendationRequest) (*Rec
 }
 
 // recommendOnce makes a single recommendation request
-func (c *Client) recommendOnce(ctx context.Context, req RecommendationRequest) (*RecommendationResult, error) {
+func (c *Client) recommendOnce(ctx context.Context, req *RecommendationRequest) (*RecommendationResult, error) {
 	url := fmt.Sprintf("%s/api/recommendations", c.baseURL)
 
 	// Marshal request body

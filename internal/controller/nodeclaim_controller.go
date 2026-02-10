@@ -69,7 +69,7 @@ type NodeClaimReconciler struct {
 //+kubebuilder:rbac:groups=cloudburst.io,resources=nodeclaims/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=cloudburst.io,resources=nodeclaims/finalizers,verbs=update
 //+kubebuilder:rbac:groups=cloudburst.io,resources=nodeclasses,verbs=get;list;watch
-//+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create
 //+kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;patch;delete
 //+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -207,15 +207,14 @@ func (r *NodeClaimReconciler) handlePending(ctx context.Context, nodeClaim *clou
 		}
 	}
 
-	startupScriptConfig := bootstrap.StartupScriptConfig{
+	startupScript := bootstrap.GenerateStartupScript(&bootstrap.StartupScriptConfig{
 		NodeName:                  nodeClaim.Name,
 		TailscaleAuthKey:          tailscaleAuthKey,
 		KubernetesVersion:         nodeClass.Spec.Bootstrap.KubernetesVersion,
 		JoinCommand:               joinCommand,
 		HostApiServer:             hostApiServer,
 		DiscoveryKubeconfigBase64: discoveryKubeconfigBase64,
-	}
-	startupScript := bootstrap.GenerateStartupScript(startupScriptConfig)
+	})
 
 	// Ensure finalizer so that when the NodeClaim is deleted we get a reconcile and can delete the GCP instance.
 	// Use Patch so we only change metadata.finalizers and avoid overwriting status (which would cause a conflict on the later status update).
@@ -288,7 +287,10 @@ func (r *NodeClaimReconciler) handleProvisioning(ctx context.Context, nodeClaim 
 	if nodeClaim.Status.Timestamps.CreatedAt.IsZero() {
 		// CreatedAt not set, set it now
 		nodeClaim.Status.Timestamps.CreatedAt = metav1.Now()
-		r.Status().Update(ctx, nodeClaim)
+		if err := r.Status().Update(ctx, nodeClaim); err != nil {
+			logger.Error(err, "failed to update CreatedAt timestamp")
+			return ctrl.Result{RequeueAfter: RequeueInterval}, err
+		}
 		return ctrl.Result{RequeueAfter: RequeueInterval}, nil
 	}
 
@@ -366,7 +368,10 @@ func (r *NodeClaimReconciler) handleJoining(ctx context.Context, nodeClaim *clou
 	if joiningStartTime.IsZero() {
 		// LastTransition not set, set it now
 		nodeClaim.Status.Timestamps.LastTransition = metav1.Now()
-		r.Status().Update(ctx, nodeClaim)
+		if err := r.Status().Update(ctx, nodeClaim); err != nil {
+			logger.Error(err, "failed to update LastTransition timestamp")
+			return ctrl.Result{RequeueAfter: RequeueInterval}, err
+		}
 		return ctrl.Result{RequeueAfter: RequeueInterval}, nil
 	}
 
@@ -617,7 +622,9 @@ func (r *NodeClaimReconciler) updateStatus(ctx context.Context, nodeClaim *cloud
 	nodeClaim.Status.Phase = phase
 	nodeClaim.Status.LastError = errorMsg
 	nodeClaim.Status.Timestamps.LastTransition = metav1.Now()
-	r.Status().Update(ctx, nodeClaim)
+	if err := r.Status().Update(ctx, nodeClaim); err != nil {
+		log.FromContext(ctx).Error(err, "failed to update NodeClaim status", "phase", phase)
+	}
 }
 
 // recordEvent records a Kubernetes event

@@ -1,7 +1,9 @@
-# CRD for NodeClass (minimal schema for integration test when make manifests is unavailable)
+---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
   name: nodeclasses.cloudburst.io
 spec:
   group: cloudburst.io
@@ -13,11 +15,150 @@ spec:
   scope: Namespaced
   versions:
   - name: v1alpha1
-    served: true
-    storage: true
     schema:
       openAPIV3Schema:
+        description: NodeClass is the Schema for the nodeclasses API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: NodeClassSpec defines the desired state of NodeClass
+            properties:
+              bootstrap:
+                description: Bootstrap configuration
+                properties:
+                  kubernetesVersion:
+                    description: KubernetesVersion is the Kubernetes version to use
+                      (optional)
+                    type: string
+                type: object
+              gcp:
+                description: GCP configuration
+                properties:
+                  imageFamily:
+                    default: ubuntu-2204-lts
+                    description: 'ImageFamily is the image family to use (default:
+                      ubuntu-2204-lts)'
+                    type: string
+                  imageProject:
+                    default: ubuntu-os-cloud
+                    description: 'ImageProject is the image project (default: ubuntu-os-cloud)'
+                    type: string
+                  project:
+                    description: Project is the GCP project ID
+                    type: string
+                  zone:
+                    description: Zone is the GCP zone
+                    type: string
+                required:
+                - project
+                - zone
+                type: object
+              join:
+                description: Join configuration for joining the Kubernetes cluster
+                properties:
+                  hostApiServer:
+                    description: HostApiServer is the API server endpoint (e.g. https://<HOST_TAILSCALE_IP>:6443)
+                    type: string
+                  kindClusterName:
+                    default: cloudburst
+                    description: |-
+                      KindClusterName is the kind cluster name (default: cloudburst)
+                      The control plane container name will be constructed as <KindClusterName>-control-plane
+                    type: string
+                  kindControlPlaneContainer:
+                    description: |-
+                      KindControlPlaneContainer is the kind control plane container name (optional, overrides KindClusterName)
+                      If not set, will be constructed as <KindClusterName>-control-plane
+                    type: string
+                  tokenTtlMinutes:
+                    default: 30
+                    description: 'TokenTtlMinutes is the token TTL in minutes (default:
+                      30)'
+                    format: int32
+                    type: integer
+                required:
+                - hostApiServer
+                type: object
+              tailscale:
+                description: Tailscale configuration for VPN connectivity
+                properties:
+                  apiTokenSecretRef:
+                    description: |-
+                      APITokenSecretRef references a secret containing the Tailscale API token (tskey-api-...).
+                      Required when EphemeralKeyFromAPI is true. The token must have devices:write (create keys).
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  authKeySecretRef:
+                    description: |-
+                      AuthKeySecretRef references a secret containing the Tailscale auth key (static key for all nodes).
+                      Ignored if EphemeralKeyFromAPI is set.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  ephemeralKeyFromAPI:
+                    description: |-
+                      EphemeralKeyFromAPI when true, the controller creates a new ephemeral auth key per NodeClaim
+                      via the Tailscale API instead of using a key from specs. Requires APITokenSecretRef.
+                      Nodes are removed from the tailnet when they run `tailscale logout` (e.g. on VM shutdown).
+                    type: boolean
+                type: object
+            required:
+            - gcp
+            - join
+            - tailscale
+            type: object
+          status:
+            description: NodeClassStatus defines the observed state of NodeClass
+            type: object
         type: object
-        x-kubernetes-preserve-unknown-fields: true
+    served: true
+    storage: true
     subresources:
       status: {}

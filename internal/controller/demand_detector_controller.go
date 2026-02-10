@@ -74,7 +74,8 @@ func (r *DemandDetectorReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 func (r *DemandDetectorReconciler) filterEligiblePods(pods []corev1.Pod) []corev1.Pod {
 	var eligible []corev1.Pod
 
-	for _, pod := range pods {
+	for i := range pods {
+		pod := &pods[i]
 		// Ignore kube-system namespace
 		if pod.Namespace == KubeSystemNamespace {
 			continue
@@ -104,7 +105,7 @@ func (r *DemandDetectorReconciler) filterEligiblePods(pods []corev1.Pod) []corev
 		}
 
 		if podScheduled {
-			eligible = append(eligible, pod)
+			eligible = append(eligible, *pod)
 		}
 	}
 

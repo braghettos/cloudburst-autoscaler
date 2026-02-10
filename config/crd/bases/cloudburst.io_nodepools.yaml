@@ -1,7 +1,9 @@
-# CRD for NodePool (minimal schema for integration test when make manifests is unavailable)
+---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
   name: nodepools.cloudburst.io
 spec:
   group: cloudburst.io
@@ -13,11 +15,148 @@ spec:
   scope: Namespaced
   versions:
   - name: v1alpha1
-    served: true
-    storage: true
     schema:
       openAPIV3Schema:
+        description: NodePool is the Schema for the nodepools API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: NodePoolSpec defines the desired state of NodePool
+            properties:
+              disruption:
+                description: Disruption defines when nodes can be disrupted
+                properties:
+                  ttlSecondsAfterEmpty:
+                    description: TTLSecondsAfterEmpty is the time in seconds after
+                      a node becomes empty before it can be disrupted
+                    format: int32
+                    type: integer
+                  ttlSecondsUntilExpired:
+                    description: TTLSecondsUntilExpired is the time in seconds until
+                      a node expires
+                    format: int32
+                    type: integer
+                required:
+                - ttlSecondsAfterEmpty
+                - ttlSecondsUntilExpired
+                type: object
+              limits:
+                description: Limits define maximum constraints
+                properties:
+                  maxNodes:
+                    description: MaxNodes is the maximum number of nodes allowed
+                    format: int32
+                    type: integer
+                  minNodes:
+                    description: |-
+                      MinNodes is the minimum number of ready nodes to keep when scaling down.
+                      When unset, defaults to 1. Set to 0 to allow scaling to zero (e.g. for testing).
+                    format: int32
+                    type: integer
+                required:
+                - maxNodes
+                type: object
+              requirements:
+                description: Requirements define constraints for node selection
+                properties:
+                  allowedProviders:
+                    description: AllowedProviders is an optional list of allowed cloud
+                      providers
+                    items:
+                      type: string
+                    type: array
+                  arch:
+                    description: Arch specifies allowed architectures
+                    items:
+                      type: string
+                    minItems: 1
+                    type: array
+                  maxPriceEurPerHour:
+                    description: MaxPriceEurPerHour is the maximum price per hour
+                      in EUR
+                    type: number
+                  minRAMGb:
+                    description: |-
+                      MinRAMGb is the minimum RAM in GB per node for this pool. Used for scaling math and CloudBroker requests.
+                      When unset, defaults to 8.
+                    type: number
+                  minVCPU:
+                    description: |-
+                      MinVCPU is the minimum vCPU per node for this pool. Used for scaling math and CloudBroker requests.
+                      When unset, defaults to 2.
+                    format: int32
+                    type: integer
+                  regionConstraint:
+                    description: 'RegionConstraint specifies the region requirement:
+                      "EU" or "ANY"'
+                    enum:
+                    - EU
+                    - ANY
+                    type: string
+                required:
+                - arch
+                - maxPriceEurPerHour
+                - regionConstraint
+                type: object
+              template:
+                description: Template defines labels and taints for nodes
+                properties:
+                  labels:
+                    additionalProperties:
+                      type: string
+                    description: Labels to apply to nodes
+                    type: object
+                  taints:
+                    description: Taints to apply to nodes
+                    items:
+                      description: Taint represents a Kubernetes taint
+                      properties:
+                        effect:
+                          type: string
+                        key:
+                          type: string
+                        value:
+                          type: string
+                      required:
+                      - effect
+                      - key
+                      - value
+                      type: object
+                    type: array
+                type: object
+              weight:
+                default: 1
+                description: Weight determines priority when multiple NodePools match
+                format: int32
+                type: integer
+            required:
+            - disruption
+            - limits
+            - requirements
+            - template
+            - weight
+            type: object
+          status:
+            description: NodePoolStatus defines the observed state of NodePool
+            type: object
         type: object
-        x-kubernetes-preserve-unknown-fields: true
+    served: true
+    storage: true
     subresources:
       status: {}

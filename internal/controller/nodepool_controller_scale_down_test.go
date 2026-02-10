@@ -34,8 +34,8 @@ import (
 
 func TestCheckScaleDown_TTLExpiry(t *testing.T) {
 	scheme := runtime.NewScheme()
-	cloudburstv1alpha1.AddToScheme(scheme)
-	corev1.AddToScheme(scheme)
+	_ = cloudburstv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
 
 	tests := []struct {
 		name           string
@@ -204,11 +204,9 @@ func TestCheckScaleDown_TTLExpiry(t *testing.T) {
 							t.Errorf("expected expired NodeClaim %s to be in Deleting phase, got %s", claim.Name, updatedClaim.Status.Phase)
 						}
 					}
-				} else {
+				} else if updatedClaim.Status.Phase == cloudburstv1alpha1.NodeClaimPhaseDeleting {
 					// Non-expired claims should not be deleted
-					if updatedClaim.Status.Phase == cloudburstv1alpha1.NodeClaimPhaseDeleting {
-						t.Errorf("expected non-expired NodeClaim %s not to be in Deleting phase, but it is", claim.Name)
-					}
+					t.Errorf("expected non-expired NodeClaim %s not to be in Deleting phase, but it is", claim.Name)
 				}
 			}
 
@@ -221,8 +219,8 @@ func TestCheckScaleDown_TTLExpiry(t *testing.T) {
 
 func TestIsNodeEmpty(t *testing.T) {
 	scheme := runtime.NewScheme()
-	cloudburstv1alpha1.AddToScheme(scheme)
-	corev1.AddToScheme(scheme)
+	_ = cloudburstv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
 
 	tests := []struct {
 		name      string

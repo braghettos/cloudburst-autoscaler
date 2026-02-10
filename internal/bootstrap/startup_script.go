@@ -23,7 +23,7 @@ import (
 )
 
 // GenerateStartupScript generates a cloud-init startup script for bootstrapping a node
-func GenerateStartupScript(config StartupScriptConfig) string {
+func GenerateStartupScript(config *StartupScriptConfig) string {
 	var script strings.Builder
 
 	script.WriteString("#!/bin/bash\n")
@@ -136,9 +136,9 @@ func GenerateStartupScript(config StartupScriptConfig) string {
 	// Set kubelet node-ip to Tailscale IPv4 and cgroup driver for cgroups v2 (Ubuntu / GCP images)
 	script.WriteString("# Configure kubelet: Tailscale node-ip and systemd cgroup driver\n")
 	script.WriteString("mkdir -p /etc/systemd/system/kubelet.service.d\n")
-	script.WriteString(fmt.Sprintf("cat > /etc/systemd/system/kubelet.service.d/10-node-ip.conf <<EOF\n"))
+	script.WriteString("cat > /etc/systemd/system/kubelet.service.d/10-node-ip.conf <<EOF\n")
 	script.WriteString("[Service]\n")
-	script.WriteString(fmt.Sprintf("Environment=\"KUBELET_EXTRA_ARGS=--node-ip=$TAILSCALE_IP --cgroup-driver=systemd\"\n"))
+	script.WriteString("Environment=\"KUBELET_EXTRA_ARGS=--node-ip=$TAILSCALE_IP --cgroup-driver=systemd\"\n")
 	script.WriteString("EOF\n")
 	script.WriteString("systemctl daemon-reload\n\n")
 
@@ -163,7 +163,7 @@ func GenerateStartupScript(config StartupScriptConfig) string {
 
 	// Execute kubeadm join with custom API server endpoint
 	script.WriteString("# Join cluster with custom API server endpoint\n")
-	script.WriteString(fmt.Sprintf("export KUBEADM_JOIN_CMD=\"%s\"\n", escapeShell(config.JoinCommand)))
+	script.WriteString(fmt.Sprintf("export KUBEADM_JOIN_CMD=%q\n", escapeShell(config.JoinCommand)))
 	// Full URL for curl health check
 	script.WriteString(fmt.Sprintf("export CUSTOM_API_SERVER=%s\n", escapeShell(config.HostApiServer)))
 	// kubeadm join expects host:port only (computed in Go to avoid shell quoting issues)
