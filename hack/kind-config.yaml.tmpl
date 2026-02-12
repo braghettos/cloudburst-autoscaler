@@ -27,3 +27,11 @@ nodes:
       - "127.0.0.1"
   # Do NOT add extraPortMappings for 6443: networking.apiServerPort already exposes it.
   # Duplicate mapping caused: "failed to bind host port 6443: address already in use"
+- role: worker
+  image: kindest/node:v1.34.3
+  kubeadmConfigPatches:
+  - |
+    kind: JoinConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        node-labels: "cloudburst.io/node=controller-worker"

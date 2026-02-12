@@ -4,7 +4,9 @@
 
 Cloudburst Autoscaler is a Kubernetes operator built with [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime) that extends a cluster by provisioning cloud VMs on demand. It is inspired by [Karpenter](https://karpenter.sh/) but focused on burst scenarios where workloads temporarily need external compute capacity.
 
-The controller watches for unschedulable pods, consults [CloudBroker](https://github.com/braghettos/cloudbroker) for optimal instance pricing, provisions GCP VMs, and bootstraps them into the cluster using `kubeadm join` over a Tailscale network.
+The controller watches for unschedulable pods, consults [CloudBroker](https://github.com/braghettos/cloudbroker) for optimal instance pricing, provisions cloud VMs (GCP, Scaleway), and bootstraps them into the cluster using `kubeadm join` over a Tailscale network.
+
+See [Provider Selection Flow](./provider-selection.md) for details on how providers are chosen.
 
 ## CRD Design
 
@@ -12,7 +14,7 @@ The controller watches for unschedulable pods, consults [CloudBroker](https://gi
 
 The **NodePool** is the primary user-facing resource. It declares:
 
-- **Requirements**: Constraints for instance selection (architecture, max price, allowed providers)
+- **Requirements**: Constraints for instance selection (architecture, max price, **allowed providers** - determines which cloud providers can be used)
 - **Limits**: Maximum and minimum node counts
 - **Disruption**: Scale-down policies (TTL after empty, TTL until expired)
 - **Template**: Labels and taints to apply to provisioned nodes
@@ -20,20 +22,22 @@ The **NodePool** is the primary user-facing resource. It declares:
 The NodePool controller is the brain of the system. It:
 1. Watches all Pods for scheduling state changes
 2. Calculates aggregate unschedulable demand (CPU millicore, memory bytes)
-3. Creates NodeClaims when demand exceeds available capacity
-4. Periodically checks for scale-down opportunities (every 30s requeue)
+3. Calls CloudBroker with `allowedProviders` constraint to get instance recommendations
+4. Matches NodeClass to the provider from CloudBroker recommendation
+5. Creates NodeClaims when demand exceeds available capacity
+6. Periodically checks for scale-down opportunities (every 30s requeue)
 
 ### NodeClass
 
 The **NodeClass** defines infrastructure-level configuration:
 
-- **GCP Config**: Project and zone for VM provisioning
-- **Image**: OS image family and project (e.g., `ubuntu-2204-lts`)
+- **GCP Config** (optional): Project and zone for GCP VM provisioning
+- **Scaleway Config** (optional): Zone, image, and credentials for Scaleway server provisioning
 - **Join Config**: Control plane API server address (Tailscale IP), token TTL
 - **Tailscale**: Auth key secret reference for node registration
 - **Bootstrap**: Kubernetes version to install on the VM
 
-NodeClass is referenced by NodeClaim to know how to provision the VM.
+NodeClass is automatically matched to the provider from CloudBroker recommendation. A NodeClass must have configuration for at least one provider (GCP or Scaleway).
 
 ### NodeClaim
 

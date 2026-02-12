@@ -67,11 +67,49 @@ docker-build: ## Build docker image with the manager.
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
 
+.PHONY: kind-load
+kind-load: docker-build ## Load docker image into Kind cluster (for local development).
+	@if ! command -v kind >/dev/null 2>&1; then \
+		echo "Error: kind is not installed"; \
+		exit 1; \
+	fi
+	@if ! kind get clusters 2>/dev/null | grep -q "^$(KIND_CLUSTER_NAME)$$"; then \
+		echo "Error: Kind cluster '$(KIND_CLUSTER_NAME)' not found"; \
+		echo "Available clusters: $$(kind get clusters 2>/dev/null || echo 'none')"; \
+		exit 1; \
+	fi
+	@echo "Loading image $(IMG) into Kind cluster '$(KIND_CLUSTER_NAME)'..."
+	@kind load docker-image ${IMG} --name $(KIND_CLUSTER_NAME) || \
+		(docker save ${IMG} | docker exec -i $(KIND_CLUSTER_NAME)-control-plane ctr --namespace=k8s.io images import - && \
+		 docker save ${IMG} | docker exec -i $(KIND_CLUSTER_NAME)-worker ctr --namespace=k8s.io images import - 2>/dev/null || true)
+	@echo "✅ Image loaded into Kind cluster"
+
 ##@ Deployment
 
 ifndef ignore-not-found
   ignore-not-found = false
 endif
+
+# Helper function to read value from .env file
+# Handles: comments, empty lines, quoted values, spaces around =
+# Usage: $(call get_env,TAILSCALE_AUTHKEY)
+get_env = $(shell if [ -f .env ]; then \
+	grep -E "^[[:space:]]*$(1)[[:space:]]*=" .env 2>/dev/null | \
+	grep -v "^[[:space:]]*#" | \
+	head -1 | \
+	sed 's/^[^=]*=[[:space:]]*//' | \
+	sed 's/[[:space:]]*$$//' | \
+	sed "s/^['\"]//" | \
+	sed "s/['\"]$$//"; \
+	fi)
+
+# Deployment configuration
+# Values are read from .env file, but can be overridden via command line
+# Priority: command line > .env file
+GCP_CREDENTIALS_FILE ?= $(call get_env,GOOGLE_APPLICATION_CREDENTIALS)
+TAILSCALE_AUTHKEY ?= $(call get_env,TAILSCALE_AUTHKEY)
+NAMESPACE ?= cloudburst-system
+KIND_CLUSTER_NAME ?= cloudburst
 
 .PHONY: install
 install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.
@@ -89,6 +127,128 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 .PHONY: undeploy
 undeploy: ## Undeploy controller from the K8s cluster.
 	$(KUSTOMIZE) build config/default | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
+
+.PHONY: create-namespace
+create-namespace: ## Create the cloudburst-system namespace.
+	$(KUBECTL) create namespace $(NAMESPACE) --dry-run=client -o yaml | $(KUBECTL) apply -f -
+
+.PHONY: create-secrets
+create-secrets: create-namespace ## Create required secrets (GCP credentials and Tailscale auth key). Reads from .env file or command line.
+	@if [ -z "$(GCP_CREDENTIALS_FILE)" ] || [ ! -f "$(GCP_CREDENTIALS_FILE)" ]; then \
+		echo "Error: GCP credentials file not found"; \
+		echo "  Expected at: $(GCP_CREDENTIALS_FILE)"; \
+		echo ""; \
+		echo "  Options:"; \
+		echo "    1. Set GOOGLE_APPLICATION_CREDENTIALS in .env file"; \
+		echo "    2. Override: make create-secrets GCP_CREDENTIALS_FILE=/path/to/gcp-sa.json"; \
+		echo "    3. Place file at: ../cloudbroker/secrets/gcp-sa.json"; \
+		exit 1; \
+	fi
+	@if [ -z "$(TAILSCALE_AUTHKEY)" ]; then \
+		echo "Error: TAILSCALE_AUTHKEY not set"; \
+		echo "  Options:"; \
+		echo "    1. Set TAILSCALE_AUTHKEY in .env file"; \
+		echo "    2. Override: make create-secrets TAILSCALE_AUTHKEY=tskey-auth-..."; \
+		exit 1; \
+	fi
+	@echo "Creating GCP credentials secret..."
+	$(KUBECTL) create secret generic gcp-credentials \
+		--from-file=credentials.json=$(GCP_CREDENTIALS_FILE) \
+		-n $(NAMESPACE) \
+		--dry-run=client -o yaml | $(KUBECTL) apply -f -
+	@echo "Creating Tailscale auth key secret..."
+	$(KUBECTL) create secret generic tailscale-auth \
+		--from-literal=authkey=$(TAILSCALE_AUTHKEY) \
+		-n $(NAMESPACE) \
+		--dry-run=client -o yaml | $(KUBECTL) apply -f -
+	@echo "✅ Secrets created successfully!"
+
+.PHONY: deploy-all
+deploy-all: create-secrets install deploy ## Deploy everything: create secrets, install CRDs, and deploy controller.
+	@echo ""
+	@echo "✅ Deployment complete!"
+	@echo ""
+	@echo "Verify deployment with:"
+	@echo "  kubectl get pods -n $(NAMESPACE)"
+	@echo "  kubectl logs -n $(NAMESPACE) -l control-plane=controller-manager"
+
+.PHONY: build-and-deploy
+build-and-deploy: docker-build ## Build Docker image, load/push, and deploy everything. Auto-detects Kind cluster for local loading.
+	@if command -v kind >/dev/null 2>&1 && kind get clusters 2>/dev/null | grep -q "^$(KIND_CLUSTER_NAME)$$"; then \
+		echo "Detected Kind cluster '$(KIND_CLUSTER_NAME)', loading image locally..."; \
+		kind load docker-image ${IMG} --name $(KIND_CLUSTER_NAME); \
+	else \
+		echo "No Kind cluster detected, pushing to registry..."; \
+		$(CONTAINER_TOOL) push ${IMG}; \
+	fi
+	@$(MAKE) deploy-all NAMESPACE=$(NAMESPACE) GCP_CREDENTIALS_FILE=$(GCP_CREDENTIALS_FILE) TAILSCALE_AUTHKEY=$(TAILSCALE_AUTHKEY)
+	@echo ""
+	@echo "🎉 Build and deployment complete!"
+	@echo ""
+	@echo "Image: $(IMG)"
+	@echo "Namespace: $(NAMESPACE)"
+	@echo ""
+	@echo "Verify deployment with:"
+	@echo "  kubectl get pods -n $(NAMESPACE)"
+	@echo "  kubectl logs -n $(NAMESPACE) -l control-plane=controller-manager"
+
+.PHONY: create-kind-cluster
+create-kind-cluster: ## Create a Kind cluster with a worker node.
+	@if ! command -v kind >/dev/null 2>&1; then \
+		echo "Error: kind is not installed. Install it from https://kind.sigs.k8s.io/"; \
+		exit 1; \
+	fi
+	@if kind get clusters 2>/dev/null | grep -q "^$(KIND_CLUSTER_NAME)$$"; then \
+		echo "Kind cluster '$(KIND_CLUSTER_NAME)' already exists. Skipping creation."; \
+		echo "To recreate, delete it first: kind delete cluster --name $(KIND_CLUSTER_NAME)"; \
+	else \
+		echo "Creating Kind cluster '$(KIND_CLUSTER_NAME)' with worker node..."; \
+		if [ -f "./hack/create-kind.sh" ]; then \
+			HOST_TS_IP=127.0.0.1 KIND_CLUSTER_NAME=$(KIND_CLUSTER_NAME) ./hack/create-kind.sh; \
+		else \
+			echo "Using inline Kind config (hack/create-kind.sh not found)..."; \
+			echo "kind: Cluster" > /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			echo "apiVersion: kind.x-k8s.io/v1alpha4" >> /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			echo "networking:" >> /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			echo "  apiServerAddress: \"0.0.0.0\"" >> /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			echo "  apiServerPort: 6443" >> /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			echo "nodes:" >> /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			echo "- role: control-plane" >> /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			echo "  image: kindest/node:v1.34.3" >> /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			echo "  kubeadmConfigPatches:" >> /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			echo "  - |" >> /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			echo "    kind: InitConfiguration" >> /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			echo "    nodeRegistration:" >> /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			echo "      kubeletExtraArgs:" >> /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			echo "        node-labels: \"cloudburst.io/node=control-plane\"" >> /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			echo "- role: worker" >> /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			echo "  image: kindest/node:v1.34.3" >> /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			echo "  kubeadmConfigPatches:" >> /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			echo "  - |" >> /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			echo "    kind: JoinConfiguration" >> /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			echo "    nodeRegistration:" >> /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			echo "      kubeletExtraArgs:" >> /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			echo "        node-labels: \"cloudburst.io/node=controller-worker\"" >> /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			kind create cluster --name $(KIND_CLUSTER_NAME) --config /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+			rm -f /tmp/kind-config-$(KIND_CLUSTER_NAME).yaml; \
+		fi \
+	fi
+	@echo "✓ Kind cluster '$(KIND_CLUSTER_NAME)' is ready"
+	@kubectl config set-cluster kind-$(KIND_CLUSTER_NAME) --server="https://127.0.0.1:6443" 2>/dev/null || true
+
+.PHONY: kind-setup-and-deploy
+kind-setup-and-deploy: create-kind-cluster docker-build kind-load deploy-all ## Create Kind cluster with worker node, build image, load locally, and deploy everything.
+	@echo ""
+	@echo "🎉 Complete Kind setup and deployment finished!"
+	@echo ""
+	@echo "Kind Cluster: $(KIND_CLUSTER_NAME)"
+	@echo "Image: $(IMG)"
+	@echo "Namespace: $(NAMESPACE)"
+	@echo ""
+	@echo "Verify deployment with:"
+	@echo "  kubectl get nodes"
+	@echo "  kubectl get pods -n $(NAMESPACE)"
+	@echo "  kubectl logs -n $(NAMESPACE) -l control-plane=controller-manager"
 
 ##@ Tools
 

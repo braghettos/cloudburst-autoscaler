@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -29,6 +30,8 @@ import (
 
 	cloudburstv1alpha1 "github.com/diegobraga/cloudburst-autoscaler/api/v1alpha1"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/gcp"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/hetzner"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/scaleway"
 )
 
 const (
@@ -68,31 +71,143 @@ func (r *NodeClaimReconciler) handleDeleting(ctx context.Context, nodeClaim *clo
 		}
 	}
 
-	// Step 3: Delete GCP instance
+	// Step 3: Delete cloud instance (GCP or Scaleway)
 	if nodeClaim.Status.InstanceID != "" {
+		provider := nodeClaim.Spec.Chosen.Provider
 		nodeClass := &cloudburstv1alpha1.NodeClass{}
 		nodeClassKey := client.ObjectKey{
 			Namespace: nodeClaim.Namespace,
 			Name:      nodeClaim.Spec.NodeClassRef,
 		}
 		if err := r.Get(ctx, nodeClassKey, nodeClass); err == nil {
-			project := gcp.GetProject(nodeClass.Spec.GCP.Project)
-			zone := gcp.GetZone(nodeClass.Spec.GCP.Zone)
+			switch provider {
+			case "gcp":
+				project := gcp.GetProject(nodeClass.Spec.GCP.Project)
+				zone := gcp.GetZone(nodeClass.Spec.GCP.Zone)
+				if project != "" && zone != "" {
+					provisioner, err := gcp.NewProvisioner(ctx, project, zone)
+					if err != nil {
+						logger.Error(err, "unable to create GCP provisioner for deletion")
+					} else {
+						defer provisioner.Close()
+						if err := provisioner.DeleteInstance(ctx, nodeClaim.Status.InstanceID); err != nil {
+							logger.Error(err, "failed to delete GCP instance", "instanceID", nodeClaim.Status.InstanceID)
+							r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InstanceDeletionFailed", fmt.Sprintf("Failed to delete instance: %v", err))
+							return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+						}
+						logger.Info("deleted GCP instance", "instanceID", nodeClaim.Status.InstanceID)
+						r.recordEvent(nodeClaim, corev1.EventTypeNormal, "InstanceDeleted", fmt.Sprintf("GCP instance deleted: %s", nodeClaim.Status.InstanceID))
+					}
+				}
+			case "scaleway":
+				if nodeClass.Spec.Scaleway != nil && nodeClass.Spec.Scaleway.Zone != "" {
+					// Fetch Scaleway API keys from secret if APIKeySecretRef is provided (same as in provisionScalewayInstance)
+					var apiSecretKey, apiAccessKey string
+					if nodeClass.Spec.Scaleway.APIKeySecretRef != nil {
+						secret := &corev1.Secret{}
+						secretKey := client.ObjectKey{
+							Namespace: nodeClaim.Namespace,
+							Name:      nodeClass.Spec.Scaleway.APIKeySecretRef.Name,
+						}
+						if err := r.Get(ctx, secretKey, secret); err != nil {
+							logger.Error(err, "failed to get Scaleway API key secret for deletion")
+							r.recordEvent(nodeClaim, corev1.EventTypeWarning, "SecretNotFound", fmt.Sprintf("Failed to get Scaleway API key secret: %v", err))
+							return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+						}
 
-			if project != "" && zone != "" {
-				provisioner, err := gcp.NewProvisioner(ctx, project, zone)
-				if err != nil {
-					logger.Error(err, "unable to create GCP provisioner for deletion")
-				} else {
-					defer provisioner.Close()
+						// Read secret key (required)
+						keyName := nodeClass.Spec.Scaleway.APIKeySecretRef.Key
+						if keyName == "" {
+							keyName = "SCW_SECRET_KEY"
+						}
+						apiSecretKey = string(secret.Data[keyName])
+						if apiSecretKey == "" {
+							apiSecretKey = string(secret.Data["secret-key"])
+						}
+						if apiSecretKey == "" {
+							err := fmt.Errorf("Scaleway API key secret %s/%s missing key %s or 'secret-key'", secretKey.Namespace, secretKey.Name, keyName)
+							logger.Error(err, "Scaleway API key secret missing key")
+							r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InvalidSecret", err.Error())
+							return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+						}
+
+						// Read access key (optional, but recommended)
+						apiAccessKey = string(secret.Data["SCW_ACCESS_KEY"])
+						if apiAccessKey == "" {
+							apiAccessKey = string(secret.Data["access-key"])
+						}
+					}
+
+					// Set env vars for Scaleway SDK (if secret provided)
+					if apiSecretKey != "" {
+						os.Setenv("SCW_SECRET_KEY", apiSecretKey)
+						defer os.Unsetenv("SCW_SECRET_KEY")
+					}
+					if apiAccessKey != "" {
+						os.Setenv("SCW_ACCESS_KEY", apiAccessKey)
+						defer os.Unsetenv("SCW_ACCESS_KEY")
+					}
+
+					provisioner, err := scaleway.NewProvisioner(ctx, nodeClass.Spec.Scaleway.Zone, nodeClass.Spec.Scaleway.ProjectID, nodeClass.Spec.Scaleway.OrganizationID)
+					if err != nil {
+						logger.Error(err, "unable to create Scaleway provisioner for deletion")
+						r.recordEvent(nodeClaim, corev1.EventTypeWarning, "ProvisionerError", fmt.Sprintf("Failed to create Scaleway provisioner: %v", err))
+						return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+					}
 					if err := provisioner.DeleteInstance(ctx, nodeClaim.Status.InstanceID); err != nil {
-						logger.Error(err, "failed to delete GCP instance", "instanceID", nodeClaim.Status.InstanceID)
+						logger.Error(err, "failed to delete Scaleway instance", "instanceID", nodeClaim.Status.InstanceID)
 						r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InstanceDeletionFailed", fmt.Sprintf("Failed to delete instance: %v", err))
 						return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 					}
-					logger.Info("deleted GCP instance", "instanceID", nodeClaim.Status.InstanceID)
-					r.recordEvent(nodeClaim, corev1.EventTypeNormal, "InstanceDeleted", fmt.Sprintf("GCP instance deleted: %s", nodeClaim.Status.InstanceID))
+				logger.Info("deleted Scaleway instance", "instanceID", nodeClaim.Status.InstanceID)
+				r.recordEvent(nodeClaim, corev1.EventTypeNormal, "InstanceDeleted", fmt.Sprintf("Scaleway instance deleted: %s", nodeClaim.Status.InstanceID))
 				}
+			case "hetzner":
+				if nodeClass.Spec.Hetzner != nil && nodeClass.Spec.Hetzner.Location != "" {
+					// Get API token from secret or env
+					var apiToken string
+					if nodeClass.Spec.Hetzner.APITokenSecretRef != nil {
+						secret := &corev1.Secret{}
+						secretKey := client.ObjectKey{
+							Namespace: nodeClaim.Namespace,
+							Name:      nodeClass.Spec.Hetzner.APITokenSecretRef.Name,
+						}
+						if err := r.Get(ctx, secretKey, secret); err != nil {
+							logger.Error(err, "failed to get Hetzner API token secret for deletion")
+							r.recordEvent(nodeClaim, corev1.EventTypeWarning, "SecretNotFound", fmt.Sprintf("Failed to get Hetzner API token secret: %v", err))
+							return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+						}
+						keyName := nodeClass.Spec.Hetzner.APITokenSecretRef.Key
+						if keyName == "" {
+							keyName = "HETZNER_API_TOKEN"
+						}
+						apiToken = string(secret.Data[keyName])
+						if apiToken == "" {
+							err := fmt.Errorf("Hetzner API token secret %s/%s missing key %s", secretKey.Namespace, secretKey.Name, keyName)
+							logger.Error(err, "Hetzner API token secret missing key")
+							r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InvalidSecret", err.Error())
+							return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+						}
+					} else {
+						apiToken = os.Getenv("HETZNER_API_TOKEN")
+					}
+
+					provisioner, err := hetzner.NewProvisioner(ctx, apiToken, nodeClass.Spec.Hetzner.Location)
+					if err != nil {
+						logger.Error(err, "unable to create Hetzner provisioner for deletion")
+						r.recordEvent(nodeClaim, corev1.EventTypeWarning, "ProvisionerError", fmt.Sprintf("Failed to create Hetzner provisioner: %v", err))
+						return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+					}
+					if err := provisioner.DeleteInstance(ctx, nodeClaim.Status.InstanceID); err != nil {
+						logger.Error(err, "failed to delete Hetzner instance", "instanceID", nodeClaim.Status.InstanceID)
+						r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InstanceDeletionFailed", fmt.Sprintf("Failed to delete instance: %v", err))
+						return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+					}
+					logger.Info("deleted Hetzner instance", "instanceID", nodeClaim.Status.InstanceID)
+					r.recordEvent(nodeClaim, corev1.EventTypeNormal, "InstanceDeleted", fmt.Sprintf("Hetzner instance deleted: %s", nodeClaim.Status.InstanceID))
+				}
+			default:
+				logger.Error(fmt.Errorf("unsupported provider"), "cannot delete instance", "provider", provider)
 			}
 		}
 	}

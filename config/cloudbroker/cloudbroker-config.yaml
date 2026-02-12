@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloudbroker-config
+  namespace: system
+  labels:
+    app.kubernetes.io/name: cloudburst-autoscaler
+data:
+  # Base URL for CloudBroker API service
+  # Defaults to http://localhost:8000 if not set
+  baseurl: "http://cloudbroker-service:8000"
+  # Optional: Timeout in seconds for CloudBroker API requests
+  # timeout-seconds: "5"

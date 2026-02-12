@@ -48,7 +48,8 @@ spec:
                     type: string
                 type: object
               gcp:
-                description: GCP configuration
+                description: GCP configuration (used when NodeClaim Chosen.Provider
+                  is gcp)
                 properties:
                   imageFamily:
                     default: ubuntu-2204-lts
@@ -68,6 +69,43 @@ spec:
                 required:
                 - project
                 - zone
+                type: object
+              hetzner:
+                description: Hetzner Cloud configuration (used when NodeClaim Chosen.Provider
+                  is hetzner)
+                properties:
+                  apiTokenSecretRef:
+                    description: |-
+                      APITokenSecretRef references a secret containing the Hetzner Cloud API token.
+                      Secret must have the key specified (default "HETZNER_API_TOKEN").
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  image:
+                    description: 'Image is the Hetzner Cloud image name or ID (default:
+                      "ubuntu-22.04")'
+                    type: string
+                  location:
+                    description: Location is the Hetzner Cloud datacenter location
+                      (e.g. "fsn1", "nbg1", "hel1")
+                    type: string
+                required:
+                - location
                 type: object
               join:
                 description: Join configuration for joining the Kubernetes cluster
@@ -94,6 +132,54 @@ spec:
                     type: integer
                 required:
                 - hostApiServer
+                type: object
+              scaleway:
+                description: Scaleway configuration (used when NodeClaim Chosen.Provider
+                  is scaleway)
+                properties:
+                  apiKeySecretRef:
+                    description: |-
+                      APIKeySecretRef references a secret containing the Scaleway API credentials.
+                      Secret must have key "SCW_SECRET_KEY" or "secret-key" (required).
+                      Secret may also have "SCW_ACCESS_KEY" or "access-key" (optional but recommended).
+                      The controller will set both SCW_SECRET_KEY and SCW_ACCESS_KEY environment variables
+                      from the secret if present. Alternatively set SCW_SECRET_KEY and SCW_ACCESS_KEY env vars.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  image:
+                    description: |-
+                      Image is the Scaleway image identifier (e.g. ubuntu_jammy, or image UUID).
+                      Defaults to Ubuntu 22.04 if empty.
+                    type: string
+                  organizationID:
+                    description: OrganizationID is the Scaleway organization ID (optional;
+                      can use default from credentials)
+                    type: string
+                  projectID:
+                    description: ProjectID is the Scaleway project ID (optional; can
+                      use default from credentials)
+                    type: string
+                  zone:
+                    description: Zone is the Scaleway zone (e.g. fr-par-1, nl-ams-1)
+                    type: string
+                required:
+                - zone
                 type: object
               tailscale:
                 description: Tailscale configuration for VPN connectivity
@@ -150,7 +236,6 @@ spec:
                     type: boolean
                 type: object
             required:
-            - gcp
             - join
             - tailscale
             type: object

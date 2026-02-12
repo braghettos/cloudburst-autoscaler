@@ -1,0 +1,24 @@
+# Scaleway NodeClass: defines how and where Scaleway instances are provisioned
+apiVersion: cloudburst.io/v1alpha1
+kind: NodeClass
+metadata:
+  name: scaleway-nodeclass
+  namespace: default
+spec:
+  scaleway:
+    zone: "fr-par-1"                      # Replace with your preferred Scaleway zone
+    projectID: "your-scaleway-project-id" # Replace with your Scaleway project ID
+    image: "ubuntu_jammy"                 # Ubuntu 22.04
+    apiKeySecretRef:
+      name: scaleway-credentials
+      key: SCW_SECRET_KEY
+  join:
+    hostApiServer: "https://<HOST_TAILSCALE_IP>:6443"  # Replace with your Tailscale IP
+    kindClusterName: "cloudburst"
+    tokenTtlMinutes: 60
+  tailscale:
+    authKeySecretRef:
+      name: tailscale-auth
+      key: authkey
+  bootstrap:
+    kubernetesVersion: "1.34.3"

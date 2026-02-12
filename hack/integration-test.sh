@@ -3,6 +3,10 @@ set -euo pipefail
 
 # Integration test script for CloudBurst Autoscaler
 # This script tests the full lifecycle: kind cluster -> NodeClaim -> GCP VM -> Kubernetes Node
+#
+# Environment Variables:
+#   This script will automatically source .env file if it exists in the project root.
+#   See .env.example for all available configuration options.
 
 # Colors for output
 RED='\033[0;31m'
@@ -10,8 +14,21 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# Source .env file if it exists (from project root)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ENV_FILE="${PROJECT_ROOT}/.env"
+
+if [ -f "${ENV_FILE}" ]; then
+    echo -e "${GREEN}[INFO]${NC} Loading environment variables from .env file"
+    # shellcheck source=/dev/null
+    set -a
+    source "${ENV_FILE}"
+    set +a
+fi
+
 # Configuration
-GCP_PROJECT="${GCP_PROJECT:-neon-481711}"
+GCP_PROJECT="${GCP_PROJECT:?GCP_PROJECT must be set (e.g. in .env or environment)}"
 GCP_ZONE="${GCP_ZONE:-us-central1-a}"
 TAILSCALE_AUTHKEY="${TAILSCALE_AUTHKEY:-}"
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-cloudburst}"

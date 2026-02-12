@@ -28,9 +28,14 @@ type DesiredCapacity struct {
 	MemBytesTotal int64
 	// PodCount is the number of pods requiring resources
 	PodCount int
+	// Arch is the architecture requirement extracted from pod nodeSelector/nodeAffinity.
+	// Empty string means no architecture requirement (any architecture is acceptable).
+	// If multiple pods have different arch requirements, this will contain the first one found.
+	Arch string
 }
 
 // CalculateDesiredCapacity sums CPU and memory requests across eligible pods
+// and extracts architecture requirements from pod nodeSelector/nodeAffinity
 func CalculateDesiredCapacity(pods []corev1.Pod) DesiredCapacity {
 	capacity := DesiredCapacity{
 		PodCount: len(pods),
@@ -40,6 +45,11 @@ func CalculateDesiredCapacity(pods []corev1.Pod) DesiredCapacity {
 		cpuMilli, memBytes := CalculateDesiredCapacityForPod(&pods[i])
 		capacity.CPUMilliTotal += cpuMilli
 		capacity.MemBytesTotal += memBytes
+
+		// Extract architecture requirement from pod (if not already set)
+		if capacity.Arch == "" {
+			capacity.Arch = ExtractArchFromPod(&pods[i])
+		}
 	}
 
 	return capacity
@@ -97,4 +107,64 @@ func CalculateDesiredCapacityForPod(pod *corev1.Pod) (cpuMilli int64, memBytes i
 	}
 
 	return cpuMilli, memBytes
+}
+
+// ExtractArchFromPod extracts architecture requirement from pod's nodeSelector or nodeAffinity.
+// Returns empty string if no architecture requirement is found.
+// Architecture is extracted from:
+// - nodeSelector: kubernetes.io/arch
+// - nodeAffinity: requiredDuringSchedulingIgnoredDuringExecution with kubernetes.io/arch
+// - nodeAffinity: preferredDuringSchedulingIgnoredDuringExecution with kubernetes.io/arch (first match)
+func ExtractArchFromPod(pod *corev1.Pod) string {
+	// Check nodeSelector first
+	if pod.Spec.NodeSelector != nil {
+		if arch, ok := pod.Spec.NodeSelector["kubernetes.io/arch"]; ok && arch != "" {
+			return arch // Return raw value, CloudBroker will normalize
+		}
+	}
+
+	// Check nodeAffinity
+	if pod.Spec.Affinity != nil && pod.Spec.Affinity.NodeAffinity != nil {
+		// Check requiredDuringSchedulingIgnoredDuringExecution
+		if required := pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution; required != nil {
+			for _, term := range required.NodeSelectorTerms {
+				for _, expr := range term.MatchExpressions {
+					if expr.Key == "kubernetes.io/arch" {
+						if len(expr.Values) > 0 {
+							return expr.Values[0] // Return raw value, CloudBroker will normalize
+						}
+					}
+				}
+				for _, field := range term.MatchFields {
+					if field.Key == "kubernetes.io/arch" {
+						if len(field.Values) > 0 {
+							return field.Values[0] // Return raw value, CloudBroker will normalize
+						}
+					}
+				}
+			}
+		}
+
+		// Check preferredDuringSchedulingIgnoredDuringExecution (use first match)
+		if preferred := pod.Spec.Affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution; preferred != nil {
+			for _, pref := range preferred {
+				for _, expr := range pref.Preference.MatchExpressions {
+					if expr.Key == "kubernetes.io/arch" {
+						if len(expr.Values) > 0 {
+							return expr.Values[0] // Return raw value, CloudBroker will normalize
+						}
+					}
+				}
+				for _, field := range pref.Preference.MatchFields {
+					if field.Key == "kubernetes.io/arch" {
+						if len(field.Values) > 0 {
+							return field.Values[0] // Return raw value, CloudBroker will normalize
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return ""
 }

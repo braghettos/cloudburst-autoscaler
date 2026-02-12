@@ -26,6 +26,9 @@ import (
 	"time"
 )
 
+// stringPtr returns a pointer to the given string value.
+func stringPtr(s string) *string { return &s }
+
 func TestNewClient(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -140,8 +143,8 @@ func TestRecommend_Success(t *testing.T) {
 		if req.MinRAMGb != 4.0 {
 			t.Errorf("expected MinRAMGb 4.0, got %f", req.MinRAMGb)
 		}
-		if req.Arch != "x86_64" {
-			t.Errorf("expected Arch x86_64, got %s", req.Arch)
+		if req.Arch == nil || *req.Arch != "x86_64" {
+			t.Errorf("expected Arch x86_64, got %v", req.Arch)
 		}
 
 		// Return response
@@ -182,7 +185,7 @@ func TestRecommend_Success(t *testing.T) {
 	req := RecommendationRequest{
 		MinVCPU:            2,
 		MinRAMGb:           4.0,
-		Arch:               "x86_64",
+		Arch:               stringPtr("x86_64"),
 		RegionConstraint:   "EU",
 		MaxPriceEurPerHour: 0.15,
 		Limit:              10,
@@ -234,7 +237,7 @@ func TestRecommend_NoRecommendations(t *testing.T) {
 	req := RecommendationRequest{
 		MinVCPU:            2,
 		MinRAMGb:           4.0,
-		Arch:               "x86_64",
+		Arch:               stringPtr("x86_64"),
 		RegionConstraint:   "EU",
 		MaxPriceEurPerHour: 0.15,
 		Limit:              10,
@@ -265,7 +268,7 @@ func TestRecommend_HTTPError(t *testing.T) {
 	req := RecommendationRequest{
 		MinVCPU:            2,
 		MinRAMGb:           4.0,
-		Arch:               "x86_64",
+		Arch:               stringPtr("x86_64"),
 		RegionConstraint:   "EU",
 		MaxPriceEurPerHour: 0.15,
 		Limit:              10,
@@ -318,7 +321,7 @@ func TestRecommend_RetryOnFailure(t *testing.T) {
 	req := RecommendationRequest{
 		MinVCPU:            2,
 		MinRAMGb:           4.0,
-		Arch:               "x86_64",
+		Arch:               stringPtr("x86_64"),
 		RegionConstraint:   "EU",
 		MaxPriceEurPerHour: 0.15,
 		Limit:              10,
@@ -355,7 +358,7 @@ func TestRecommend_InvalidJSON(t *testing.T) {
 	req := RecommendationRequest{
 		MinVCPU:            2,
 		MinRAMGb:           4.0,
-		Arch:               "x86_64",
+		Arch:               stringPtr("x86_64"),
 		RegionConstraint:   "EU",
 		MaxPriceEurPerHour: 0.15,
 		Limit:              10,
@@ -397,7 +400,7 @@ func TestRecommend_ContextCancellation(t *testing.T) {
 	req := RecommendationRequest{
 		MinVCPU:            2,
 		MinRAMGb:           4.0,
-		Arch:               "x86_64",
+		Arch:               stringPtr("x86_64"),
 		RegionConstraint:   "EU",
 		MaxPriceEurPerHour: 0.15,
 		Limit:              10,

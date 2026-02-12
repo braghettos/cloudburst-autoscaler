@@ -34,25 +34,20 @@ spec:
         args:
         - --leader-elect
         image: controller:latest
+        imagePullPolicy: IfNotPresent
         name: manager
         env:
-        - name: GCP_PROJECT
-          valueFrom:
-            configMapKeyRef:
-              name: controller-config
-              key: gcp-project
-              optional: true
-        - name: GCP_ZONE
-          valueFrom:
-            configMapKeyRef:
-              name: controller-config
-              key: gcp-zone
-              optional: true
         - name: CLOUDBROKER_BASEURL
           valueFrom:
             configMapKeyRef:
-              name: controller-config
-              key: cloudbroker-baseurl
+              name: cloudbroker-config
+              key: baseurl
+              optional: true
+        - name: CLOUDBROKER_TIMEOUT_SECONDS
+          valueFrom:
+            configMapKeyRef:
+              name: cloudbroker-config
+              key: timeout-seconds
               optional: true
         - name: GOOGLE_APPLICATION_CREDENTIALS
           value: /var/run/secrets/gcp/credentials.json

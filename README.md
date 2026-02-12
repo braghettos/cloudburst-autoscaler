@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="Cloudburst Autoscaler" width="200">
+  <img src="assets/logo.png" alt="Cloudburst Autoscaler" width="200">
 </p>
 
 <h1 align="center">Cloudburst Autoscaler</h1>
 
-A Kubernetes controller that automatically provisions cloud VMs as worker nodes in response to unschedulable pod demand. When pods cannot be scheduled due to insufficient capacity, the controller requests an optimal instance from [CloudBroker](https://github.com/braghettos/cloudbroker), provisions a GCP VM, bootstraps it into the cluster via `kubeadm join`, and removes it when no longer needed.
+A Kubernetes controller that automatically provisions cloud VMs as worker nodes in response to unschedulable pod demand. When pods cannot be scheduled due to insufficient capacity, the controller requests an optimal instance from [CloudBroker](https://github.com/braghettos/cloudbroker), provisions a VM (GCP or Scaleway), bootstraps it into the cluster via `kubeadm join`, and removes it when no longer needed.
 
 ## Architecture
 
@@ -114,6 +114,8 @@ cb-<nodepool-name>-<k8s-suffix>
 │   ├── gcp/                         # GCP Compute Engine provisioner
 │   │   ├── provisioner.go
 │   │   └── instance_status.go
+│   ├── scaleway/                    # Scaleway instance provisioner
+│   │   └── provisioner.go
 │   ├── planner/                     # Capacity planning utilities
 │   │   └── planner.go
 │   └── tailscale/                   # Tailscale API client
@@ -122,14 +124,19 @@ cb-<nodepool-name>-<k8s-suffix>
 │   ├── crd/                         # CRD definitions
 │   ├── rbac/                        # RBAC rules
 │   ├── manager/                     # Controller Deployment
+│   ├── cloudbroker/                 # CloudBroker ConfigMap
 │   ├── default/                     # Kustomize overlay (combines all)
-│   └── samples/                     # Example CRs
+│   └── samples/                     # Example CRs (GCP + Scaleway)
 ├── hack/                            # Development scripts
 │   ├── create-kind.sh               # Create local Kind cluster
 │   ├── integration-test.sh          # NodeClaim lifecycle test
 │   ├── integration-test-e2e.sh      # Full E2E test (scale-up + scale-down)
-│   └── get-join.sh                  # Helper: get kubeadm join token
+│   └── test-multi-provider.sh       # Multi-provider test (GCP + Scaleway)
 └── docs/                            # Additional documentation
+    ├── E2E_MANUAL_TEST.md           # Manual E2E testing guide
+    ├── architecture.md
+    ├── provider-selection.md
+    └── tailscale-kind-gcp.md
 ```
 
 ## Prerequisites
@@ -139,7 +146,8 @@ cb-<nodepool-name>-<k8s-suffix>
 - kubectl
 - [Kind](https://kind.sigs.k8s.io/) (for local development)
 - [Tailscale](https://tailscale.com/) (for node-to-control-plane networking)
-- GCP service account with Compute Engine permissions
+- GCP service account with Compute Engine permissions (for GCP provider)
+- Scaleway API keys (for Scaleway provider)
 - [CloudBroker](https://github.com/braghettos/cloudbroker) instance running
 
 ## Quick Start
@@ -155,16 +163,52 @@ make generate           # Generate DeepCopy methods
 
 ### Deploy to a Cluster
 
+**Prerequisites:**
+Create a `.env` file from `.env.example` and configure required variables:
 ```bash
-# Install CRDs
-make install
-
-# Deploy the controller (uses kustomize)
-make deploy IMG=ghcr.io/braghettos/cloudburst-autoscaler:latest
-
-# Undeploy
-make undeploy
+cp .env.example .env
+# Edit .env with your values:
+#   - GOOGLE_APPLICATION_CREDENTIALS (path to GCP service account JSON)
+#   - TAILSCALE_AUTHKEY (Tailscale auth key)
+#
+# Note: GCP_PROJECT and GCP_ZONE are configured in NodeClass resources,
+#       not in the .env file
 ```
+
+**Local Kind Deploy (Recommended for development):**
+```bash
+# Create Kind cluster, build image locally, load into Kind, and deploy everything
+make kind-setup-and-deploy IMG=cloudburst-autoscaler:latest
+```
+
+**Build & Deploy (auto-detects Kind vs registry):**
+```bash
+# Builds image, detects Kind cluster (loads locally) or pushes to registry, deploys
+make build-and-deploy IMG=cloudburst-autoscaler:latest
+```
+
+**Deploy Only (image must already exist):**
+```bash
+make deploy-all IMG=cloudburst-autoscaler:latest
+```
+
+**Step-by-Step Deploy:**
+```bash
+make create-secrets        # Create namespace and secrets (from .env)
+make install               # Install CRDs
+make deploy IMG=...        # Deploy the controller
+make undeploy              # Undeploy
+```
+
+**Override Variables:**
+```bash
+make deploy-all \
+  IMG=my-registry/cloudburst:latest \
+  GCP_CREDENTIALS_FILE=/custom/path/gcp-sa.json \
+  TAILSCALE_AUTHKEY=tskey-auth-...
+```
+
+**Note:** The Makefile reads `GOOGLE_APPLICATION_CREDENTIALS` and `TAILSCALE_AUTHKEY` from `.env`. See [docs/E2E_MANUAL_TEST.md](docs/E2E_MANUAL_TEST.md) for full testing instructions.
 
 ### Run Locally (development)
 
@@ -173,8 +217,6 @@ make undeploy
 ./hack/create-kind.sh
 
 # Run the controller against the Kind cluster
-export GCP_PROJECT=my-project
-export GCP_ZONE=us-central1-a
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
 export TAILSCALE_AUTHKEY=tskey-auth-...
 export CLOUDBROKER_BASEURL=http://localhost:8000
@@ -185,10 +227,8 @@ make run
 
 ```bash
 # Required environment variables (see .env.example)
-export GCP_PROJECT=my-project
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
 export TAILSCALE_AUTHKEY=tskey-auth-...
-export GCP_ZONE=us-central1-a
 
 # NodeClaim lifecycle test (manual NodeClaim creation)
 ./hack/integration-test.sh
@@ -199,19 +239,55 @@ export GCP_ZONE=us-central1-a
 
 ## Configuration
 
-### Environment Variables
+### Controller Configuration
+
+The controller requires the following Kubernetes resources:
+
+#### CloudBroker ConfigMap (`cloudbroker-config`)
+
+Configures the CloudBroker API connection:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloudbroker-config
+  namespace: cloudburst-system
+data:
+  baseurl: "http://cloudbroker-service:8000"  # CloudBroker API URL
+  timeout-seconds: "5"  # Optional: API request timeout
+```
+
+#### Secrets
+
+- **GCP Credentials** (`gcp-credentials`): Secret containing GCP service account JSON key
+  - Key: `credentials.json`
+  - Mounted at: `/var/run/secrets/gcp/credentials.json`
+- **Tailscale Auth Key** (`tailscale-auth`): Secret containing Tailscale auth key
+  - Key: `authkey`
+
+#### Provider Configuration
+
+Provider-specific configuration (GCP project/zone, Scaleway project ID/zone/organization ID, etc.) is defined in **NodeClass** resources, not in the controller ConfigMap or environment variables. This allows multiple providers and configurations to coexist.
+
+**Note**: Provider-specific settings like `GCP_PROJECT`, `GCP_ZONE`, `SCW_PROJECT_ID`, and `SCW_DEFAULT_ZONE` should be configured in NodeClass resources, not in the `.env` file.
+
+### Environment Variables (Local Development Only)
+
+When running locally with `make run`, these environment variables are used:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GCP_PROJECT` | Yes | GCP project ID |
-| `GCP_ZONE` | Yes | GCP zone for VM provisioning |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Yes | Path to GCP service account JSON key |
 | `TAILSCALE_AUTHKEY` | Yes | Tailscale auth key for node registration |
 | `CLOUDBROKER_BASEURL` | No | CloudBroker API URL (default: `http://localhost:8000`) |
 
+**Note**: `GCP_PROJECT` and `GCP_ZONE` are no longer required as environment variables. These are now specified in NodeClass resources.
+
 ### Example Resources
 
 ```yaml
+# GCP NodeClass example
 apiVersion: cloudburst.io/v1alpha1
 kind: NodeClass
 metadata:
@@ -220,8 +296,8 @@ spec:
   gcp:
     project: my-project
     zone: us-central1-a
-  imageFamily: ubuntu-2204-lts
-  imageProject: ubuntu-os-cloud
+    imageFamily: ubuntu-2204-lts      # default
+    imageProject: ubuntu-os-cloud     # default
   join:
     hostApiServer: "https://<tailscale-ip>:6443"
     tokenTtlMinutes: 60
@@ -231,6 +307,41 @@ spec:
       key: authkey
   bootstrap:
     kubernetesVersion: "1.34.3"
+---
+# Scaleway NodeClass example
+apiVersion: cloudburst.io/v1alpha1
+kind: NodeClass
+metadata:
+  name: scaleway-standard
+spec:
+  scaleway:
+    zone: fr-par-1
+    projectID: "your-project-id"
+    organizationID: "your-org-id"  # optional
+    image: ubuntu_jammy  # optional, defaults to Ubuntu 22.04
+    apiKeySecretRef:
+      name: scaleway-credentials
+      key: SCW_SECRET_KEY  # Secret must contain SCW_SECRET_KEY (required) and SCW_ACCESS_KEY (recommended)
+  join:
+    hostApiServer: "https://<tailscale-ip>:6443"
+    tokenTtlMinutes: 60
+  tailscale:
+    authKeySecretRef:
+      name: tailscale-auth
+      key: authkey
+  bootstrap:
+    kubernetesVersion: "1.34.3"
+---
+# Example secret for Scaleway credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: scaleway-credentials
+  namespace: default
+type: Opaque
+stringData:
+  SCW_SECRET_KEY: "your-scaleway-secret-key"
+  SCW_ACCESS_KEY: "your-scaleway-access-key"  # Recommended for proper authentication
 ---
 apiVersion: cloudburst.io/v1alpha1
 kind: NodePool
@@ -248,6 +359,14 @@ spec:
     ttlSecondsAfterEmpty: 300
     ttlSecondsUntilExpired: 3600
 ```
+
+## Documentation
+
+- [Architecture](docs/architecture.md) -- CRD design, controller interaction, bootstrap process, networking
+- [Provider Selection Flow](docs/provider-selection.md) -- how providers are chosen end-to-end
+- [Tailscale + Kind + GCP Networking](docs/tailscale-kind-gcp.md) -- how VMs reach a local Kind cluster over Tailscale
+- [End-to-End Manual Testing Guide](docs/E2E_MANUAL_TEST.md) -- full step-by-step testing instructions
+- [Multi-Provider Testing Guide](hack/MULTI_PROVIDER_TEST.md) -- testing with GCP and Scaleway simultaneously
 
 ## License
 

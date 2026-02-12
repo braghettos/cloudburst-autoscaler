@@ -19,7 +19,6 @@ package gcp
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -60,19 +59,15 @@ func NewProvisioner(ctx context.Context, project, zone string) (*Provisioner, er
 	}, nil
 }
 
-// GetProject gets the project from environment or fallback
+// GetProject returns the project value from NodeClass.
+// The fallback parameter is the value from NodeClass.Spec.GCP.Project.
 func GetProject(fallback string) string {
-	if project := os.Getenv("GCP_PROJECT"); project != "" {
-		return project
-	}
 	return fallback
 }
 
-// GetZone gets the zone from environment or fallback
+// GetZone returns the zone value from NodeClass.
+// The fallback parameter is the value from NodeClass.Spec.GCP.Zone.
 func GetZone(fallback string) string {
-	if zone := os.Getenv("GCP_ZONE"); zone != "" {
-		return zone
-	}
 	return fallback
 }
 

@@ -82,7 +82,10 @@ spec:
                       type: string
                     type: array
                   arch:
-                    description: Arch specifies allowed architectures
+                    description: |-
+                      Arch specifies allowed architectures
+                      Deprecated: Architecture is now extracted from pod nodeSelector/nodeAffinity (kubernetes.io/arch)
+                      and passed to CloudBroker. This field is ignored by the controller.
                     items:
                       type: string
                     minItems: 1

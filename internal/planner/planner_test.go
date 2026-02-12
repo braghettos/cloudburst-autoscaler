@@ -340,3 +340,274 @@ func TestCalculateDesiredCapacity(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractArchFromPod(t *testing.T) {
+	tests := []struct {
+		name     string
+		pod      corev1.Pod
+		expected string
+	}{
+		{
+			name: "no architecture requirement",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{},
+			},
+			expected: "",
+		},
+		{
+			name: "architecture from nodeSelector - amd64",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					NodeSelector: map[string]string{
+						"kubernetes.io/arch": "amd64",
+					},
+				},
+			},
+			expected: "amd64", // Raw value, CloudBroker will normalize to x86_64
+		},
+		{
+			name: "architecture from nodeSelector - x86_64",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					NodeSelector: map[string]string{
+						"kubernetes.io/arch": "x86_64",
+					},
+				},
+			},
+			expected: "x86_64",
+		},
+		{
+			name: "architecture from nodeSelector - arm64",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					NodeSelector: map[string]string{
+						"kubernetes.io/arch": "arm64",
+					},
+				},
+			},
+			expected: "arm64",
+		},
+		{
+			name: "architecture from nodeSelector - aarch64",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					NodeSelector: map[string]string{
+						"kubernetes.io/arch": "aarch64",
+					},
+				},
+			},
+			expected: "aarch64", // Raw value, CloudBroker will normalize to arm64
+		},
+		{
+			name: "architecture from required nodeAffinity",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					Affinity: &corev1.Affinity{
+						NodeAffinity: &corev1.NodeAffinity{
+							RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+								NodeSelectorTerms: []corev1.NodeSelectorTerm{
+									{
+										MatchExpressions: []corev1.NodeSelectorRequirement{
+											{
+												Key:      "kubernetes.io/arch",
+												Operator: corev1.NodeSelectorOpIn,
+												Values:   []string{"arm64"},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "arm64",
+		},
+		{
+			name: "architecture from preferred nodeAffinity",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					Affinity: &corev1.Affinity{
+						NodeAffinity: &corev1.NodeAffinity{
+							PreferredDuringSchedulingIgnoredDuringExecution: []corev1.PreferredSchedulingTerm{
+								{
+									Weight: 100,
+									Preference: corev1.NodeSelectorTerm{
+										MatchExpressions: []corev1.NodeSelectorRequirement{
+											{
+												Key:      "kubernetes.io/arch",
+												Operator: corev1.NodeSelectorOpIn,
+												Values:   []string{"amd64"},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "amd64", // Raw value, CloudBroker will normalize to x86_64
+		},
+		{
+			name: "nodeSelector takes precedence over nodeAffinity",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					NodeSelector: map[string]string{
+						"kubernetes.io/arch": "arm64",
+					},
+					Affinity: &corev1.Affinity{
+						NodeAffinity: &corev1.NodeAffinity{
+							RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+								NodeSelectorTerms: []corev1.NodeSelectorTerm{
+									{
+										MatchExpressions: []corev1.NodeSelectorRequirement{
+											{
+												Key:      "kubernetes.io/arch",
+												Operator: corev1.NodeSelectorOpIn,
+												Values:   []string{"amd64"},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "arm64", // nodeSelector should be checked first
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ExtractArchFromPod(&tt.pod)
+			if result != tt.expected {
+				t.Errorf("expected architecture %q, got %q", tt.expected, result)
+			}
+		})
+	}
+}
+
+func TestCalculateDesiredCapacityWithArch(t *testing.T) {
+	tests := []struct {
+		name           string
+		pods           []corev1.Pod
+		expectedArch   string
+		expectedCPU    int64
+		expectedMemory int64
+	}{
+		{
+			name:           "no pods - no arch",
+			pods:           []corev1.Pod{},
+			expectedArch:   "",
+			expectedCPU:    0,
+			expectedMemory: 0,
+		},
+		{
+			name: "pod with arch requirement",
+			pods: []corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "pod1"},
+					Spec: corev1.PodSpec{
+						NodeSelector: map[string]string{
+							"kubernetes.io/arch": "arm64",
+						},
+						Containers: []corev1.Container{
+							{
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("100m"),
+										corev1.ResourceMemory: resource.MustParse("128Mi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedArch:   "arm64",
+			expectedCPU:    100,
+			expectedMemory: 134217728,
+		},
+		{
+			name: "multiple pods - first arch wins",
+			pods: []corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "pod1"},
+					Spec: corev1.PodSpec{
+						NodeSelector: map[string]string{
+							"kubernetes.io/arch": "amd64",
+						},
+						Containers: []corev1.Container{
+							{
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU: resource.MustParse("100m"),
+									},
+								},
+							},
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "pod2"},
+					Spec: corev1.PodSpec{
+						NodeSelector: map[string]string{
+							"kubernetes.io/arch": "arm64",
+						},
+						Containers: []corev1.Container{
+							{
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU: resource.MustParse("200m"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedArch:   "amd64", // First pod's arch (raw value, CloudBroker will normalize)
+			expectedCPU:    300,
+			expectedMemory: 0,
+		},
+		{
+			name: "pod without arch requirement",
+			pods: []corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "pod1"},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU: resource.MustParse("100m"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedArch:   "", // No arch requirement
+			expectedCPU:    100,
+			expectedMemory: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			capacity := CalculateDesiredCapacity(tt.pods)
+			if capacity.Arch != tt.expectedArch {
+				t.Errorf("expected Arch %q, got %q", tt.expectedArch, capacity.Arch)
+			}
+			if capacity.CPUMilliTotal != tt.expectedCPU {
+				t.Errorf("expected CPU %d millicores, got %d", tt.expectedCPU, capacity.CPUMilliTotal)
+			}
+			if capacity.MemBytesTotal != tt.expectedMemory {
+				t.Errorf("expected Memory %d bytes, got %d", tt.expectedMemory, capacity.MemBytesTotal)
+			}
+		})
+	}
+}

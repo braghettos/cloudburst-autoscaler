@@ -23,8 +23,17 @@ import (
 
 // NodeClassSpec defines the desired state of NodeClass
 type NodeClassSpec struct {
-	// GCP configuration
-	GCP GCPConfig `json:"gcp"`
+	// GCP configuration (used when NodeClaim Chosen.Provider is gcp)
+	// +optional
+	GCP GCPConfig `json:"gcp,omitempty"`
+
+	// Scaleway configuration (used when NodeClaim Chosen.Provider is scaleway)
+	// +optional
+	Scaleway *ScalewayConfig `json:"scaleway,omitempty"`
+
+	// Hetzner Cloud configuration (used when NodeClaim Chosen.Provider is hetzner)
+	// +optional
+	Hetzner *HetznerConfig `json:"hetzner,omitempty"`
 
 	// Join configuration for joining the Kubernetes cluster
 	Join JoinConfig `json:"join"`
@@ -52,6 +61,48 @@ type GCPConfig struct {
 	// ImageProject is the image project (default: ubuntu-os-cloud)
 	// +kubebuilder:default=ubuntu-os-cloud
 	ImageProject string `json:"imageProject,omitempty"`
+}
+
+// ScalewayConfig defines Scaleway-specific configuration
+type ScalewayConfig struct {
+	// Zone is the Scaleway zone (e.g. fr-par-1, nl-ams-1)
+	Zone string `json:"zone"`
+
+	// ProjectID is the Scaleway project ID (optional; can use default from credentials)
+	// +optional
+	ProjectID string `json:"projectID,omitempty"`
+
+	// OrganizationID is the Scaleway organization ID (optional; can use default from credentials)
+	// +optional
+	OrganizationID string `json:"organizationID,omitempty"`
+
+	// Image is the Scaleway image identifier (e.g. ubuntu_jammy, or image UUID).
+	// Defaults to Ubuntu 22.04 if empty.
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// APIKeySecretRef references a secret containing the Scaleway API credentials.
+	// Secret must have key "SCW_SECRET_KEY" or "secret-key" (required).
+	// Secret may also have "SCW_ACCESS_KEY" or "access-key" (optional but recommended).
+	// The controller will set both SCW_SECRET_KEY and SCW_ACCESS_KEY environment variables
+	// from the secret if present. Alternatively set SCW_SECRET_KEY and SCW_ACCESS_KEY env vars.
+	// +optional
+	APIKeySecretRef *corev1.SecretKeySelector `json:"apiKeySecretRef,omitempty"`
+}
+
+// HetznerConfig defines Hetzner Cloud-specific configuration
+type HetznerConfig struct {
+	// Location is the Hetzner Cloud datacenter location (e.g. "fsn1", "nbg1", "hel1")
+	Location string `json:"location"`
+
+	// APITokenSecretRef references a secret containing the Hetzner Cloud API token.
+	// Secret must have the key specified (default "HETZNER_API_TOKEN").
+	// +optional
+	APITokenSecretRef *corev1.SecretKeySelector `json:"apiTokenSecretRef,omitempty"`
+
+	// Image is the Hetzner Cloud image name or ID (default: "ubuntu-22.04")
+	// +optional
+	Image string `json:"image,omitempty"`
 }
 
 // JoinConfig defines how nodes join the Kubernetes cluster
@@ -102,8 +153,6 @@ type BootstrapConfig struct {
 
 // NodeClassStatus defines the observed state of NodeClass
 type NodeClassStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
 }
 
 //+kubebuilder:object:root=true

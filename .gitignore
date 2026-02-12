@@ -29,5 +29,8 @@ go.work
 .env
 secrets/
 
+# Generated Kind config
+hack/kind-config.yaml
+
 # macOS
 .DS_Store

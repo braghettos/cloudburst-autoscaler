@@ -6,6 +6,4 @@ resources:
 - ../crd
 - ../rbac
 - ../manager
-
-patches:
-- path: crd_patch.yaml
+- ../cloudbroker

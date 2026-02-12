@@ -1,0 +1,25 @@
+# GCP NodePool: scaling policy for GCP provider
+apiVersion: cloudburst.io/v1alpha1
+kind: NodePool
+metadata:
+  name: gcp-nodepool
+  namespace: default
+spec:
+  requirements:
+    regionConstraint: "ANY"
+    arch:
+    - "x86_64"
+    maxPriceEurPerHour: 0.15
+    allowedProviders:
+    - "gcp"
+  limits:
+    maxNodes: 3
+    minNodes: 0                           # Allow scale-down to zero for testing
+  template:
+    labels:
+      cloudburst.io/nodepool: "gcp-nodepool"
+      cloudburst.io/provider: "gcp"
+  disruption:
+    ttlSecondsAfterEmpty: 60              # Scale down 60s after node becomes empty
+    ttlSecondsUntilExpired: 3600
+  weight: 1

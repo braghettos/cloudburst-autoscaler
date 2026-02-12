@@ -48,6 +48,8 @@ type NodePoolRequirements struct {
 	RegionConstraint string `json:"regionConstraint"`
 
 	// Arch specifies allowed architectures
+	// Deprecated: Architecture is now extracted from pod nodeSelector/nodeAffinity (kubernetes.io/arch)
+	// and passed to CloudBroker. This field is ignored by the controller.
 	// +kubebuilder:validation:MinItems=1
 	Arch []string `json:"arch"`
 
@@ -111,8 +113,6 @@ type NodePoolDisruption struct {
 
 // NodePoolStatus defines the observed state of NodePool
 type NodePoolStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
 }
 
 //+kubebuilder:object:root=true

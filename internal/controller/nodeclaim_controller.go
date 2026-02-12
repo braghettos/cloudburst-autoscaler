@@ -41,6 +41,8 @@ import (
 	cloudburstv1alpha1 "github.com/diegobraga/cloudburst-autoscaler/api/v1alpha1"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/bootstrap"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/gcp"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/hetzner"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/scaleway"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/tailscale"
 )
 
@@ -136,13 +138,11 @@ func (r *NodeClaimReconciler) handlePending(ctx context.Context, nodeClaim *clou
 		return ctrl.Result{}, err
 	}
 
-	// Get project and zone (env vars with fallback to NodeClass)
-	project := gcp.GetProject(nodeClass.Spec.GCP.Project)
-	zone := gcp.GetZone(nodeClass.Spec.GCP.Zone)
-
-	if project == "" || zone == "" {
-		err := fmt.Errorf("project and zone must be set (env vars or NodeClass)")
-		logger.Error(err, "missing GCP configuration")
+	// Determine provider from NodeClaim
+	provider := nodeClaim.Spec.Chosen.Provider
+	if provider == "" {
+		err := fmt.Errorf("NodeClaim %s spec.chosen.provider is required", nodeClaim.Name)
+		logger.Error(err, "missing provider")
 		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InvalidConfiguration", err.Error())
 		r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error())
 		return ctrl.Result{}, err
@@ -216,7 +216,7 @@ func (r *NodeClaimReconciler) handlePending(ctx context.Context, nodeClaim *clou
 		DiscoveryKubeconfigBase64: discoveryKubeconfigBase64,
 	})
 
-	// Ensure finalizer so that when the NodeClaim is deleted we get a reconcile and can delete the GCP instance.
+	// Ensure finalizer so that when the NodeClaim is deleted we get a reconcile and can delete the cloud instance.
 	// Use Patch so we only change metadata.finalizers and avoid overwriting status (which would cause a conflict on the later status update).
 	if !controllerutil.ContainsFinalizer(nodeClaim, NodeClaimFinalizer) {
 		original := nodeClaim.DeepCopy()
@@ -227,36 +227,23 @@ func (r *NodeClaimReconciler) handlePending(ctx context.Context, nodeClaim *clou
 		}
 	}
 
-	// Create provisioner
-	provisioner, err := gcp.NewProvisioner(ctx, project, zone)
-	if err != nil {
-		logger.Error(err, "unable to create GCP provisioner")
-		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "ProvisionerError", fmt.Sprintf("Failed to create provisioner: %v", err))
+	// Provision instance based on provider
+	var instanceID string
+	switch provider {
+	case "gcp":
+		instanceID, err = r.provisionGCPInstance(ctx, nodeClaim, nodeClass, startupScript, logger)
+	case "scaleway":
+		instanceID, err = r.provisionScalewayInstance(ctx, nodeClaim, nodeClass, startupScript, logger)
+	case "hetzner":
+		instanceID, err = r.provisionHetznerInstance(ctx, nodeClaim, nodeClass, startupScript, logger)
+	default:
+		err = fmt.Errorf("unsupported provider: %s (supported: gcp, scaleway, hetzner)", provider)
+		logger.Error(err, "unsupported provider")
+		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "UnsupportedProvider", err.Error())
+		r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error())
 		return ctrl.Result{}, err
 	}
-	defer provisioner.Close()
-
-	// Generate instance name
-	instanceName := gcp.GenerateInstanceName(nodeClaim.Name)
-
-	// Build machine type from instance details
-	machineType := nodeClaim.Spec.Chosen.InstanceType
-
-	// Create instance
-	logger.Info("creating GCP instance",
-		"instanceName", instanceName,
-		"machineType", machineType,
-		"zone", zone,
-		"project", project,
-	)
-
-	r.recordEvent(nodeClaim, corev1.EventTypeNormal, "InstanceCreationStarted", fmt.Sprintf("Creating GCP instance %s", instanceName))
-
-	instanceID, err := provisioner.CreateInstance(ctx, instanceName, machineType, zone, startupScript)
 	if err != nil {
-		logger.Error(err, "failed to create GCP instance")
-		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InstanceCreationFailed", fmt.Sprintf("Failed to create instance: %v", err))
-		r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error())
 		return ctrl.Result{}, err
 	}
 
@@ -273,10 +260,219 @@ func (r *NodeClaimReconciler) handlePending(ctx context.Context, nodeClaim *clou
 
 	logger.Info("instance created, transitioning to Provisioning",
 		"instanceID", instanceID,
+		"provider", provider,
 	)
-	r.recordEvent(nodeClaim, corev1.EventTypeNormal, "InstanceCreated", fmt.Sprintf("GCP instance created: %s", instanceID))
+	r.recordEvent(nodeClaim, corev1.EventTypeNormal, "InstanceCreated", fmt.Sprintf("%s instance created: %s", provider, instanceID))
 
 	return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+}
+
+// provisionGCPInstance provisions a GCP instance and returns the instance ID.
+func (r *NodeClaimReconciler) provisionGCPInstance(ctx context.Context, nodeClaim *cloudburstv1alpha1.NodeClaim, nodeClass *cloudburstv1alpha1.NodeClass, startupScript string, logger logr.Logger) (string, error) {
+	project := gcp.GetProject(nodeClass.Spec.GCP.Project)
+	zone := gcp.GetZone(nodeClass.Spec.GCP.Zone)
+
+	if project == "" || zone == "" {
+		err := fmt.Errorf("project and zone must be set in NodeClass.Spec.GCP")
+		logger.Error(err, "missing GCP configuration")
+		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InvalidConfiguration", err.Error())
+		r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error())
+		return "", err
+	}
+
+	provisioner, err := gcp.NewProvisioner(ctx, project, zone)
+	if err != nil {
+		logger.Error(err, "unable to create GCP provisioner")
+		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "ProvisionerError", fmt.Sprintf("Failed to create provisioner: %v", err))
+		return "", err
+	}
+	defer provisioner.Close()
+
+	instanceName := gcp.GenerateInstanceName(nodeClaim.Name)
+	machineType := nodeClaim.Spec.Chosen.InstanceType
+
+	logger.Info("creating GCP instance",
+		"instanceName", instanceName,
+		"machineType", machineType,
+		"zone", zone,
+		"project", project,
+	)
+	r.recordEvent(nodeClaim, corev1.EventTypeNormal, "InstanceCreationStarted", fmt.Sprintf("Creating GCP instance %s", instanceName))
+
+	instanceID, err := provisioner.CreateInstance(ctx, instanceName, machineType, zone, startupScript)
+	if err != nil {
+		logger.Error(err, "failed to create GCP instance")
+		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InstanceCreationFailed", fmt.Sprintf("Failed to create instance: %v", err))
+		r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error())
+		return "", err
+	}
+	return instanceID, nil
+}
+
+// provisionScalewayInstance provisions a Scaleway instance and returns the instance ID.
+func (r *NodeClaimReconciler) provisionScalewayInstance(ctx context.Context, nodeClaim *cloudburstv1alpha1.NodeClaim, nodeClass *cloudburstv1alpha1.NodeClass, startupScript string, logger logr.Logger) (string, error) {
+	if nodeClass.Spec.Scaleway == nil {
+		err := fmt.Errorf("NodeClass %s spec.scaleway is required for Scaleway provider", nodeClass.Name)
+		logger.Error(err, "missing Scaleway configuration")
+		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InvalidConfiguration", err.Error())
+		r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error())
+		return "", err
+	}
+
+	zone := nodeClass.Spec.Scaleway.Zone
+	if zone == "" {
+		err := fmt.Errorf("NodeClass %s spec.scaleway.zone is required", nodeClass.Name)
+		logger.Error(err, "missing Scaleway zone")
+		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InvalidConfiguration", err.Error())
+		r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error())
+		return "", err
+	}
+
+	// Get API keys from secret if configured
+	var apiSecretKey, apiAccessKey string
+	if nodeClass.Spec.Scaleway.APIKeySecretRef != nil {
+		secret := &corev1.Secret{}
+		secretKey := client.ObjectKey{
+			Namespace: nodeClaim.Namespace,
+			Name:      nodeClass.Spec.Scaleway.APIKeySecretRef.Name,
+		}
+		if err := r.Get(ctx, secretKey, secret); err != nil {
+			return "", fmt.Errorf("failed to get Scaleway API key secret: %w", err)
+		}
+
+		// Read secret key (required)
+		keyName := nodeClass.Spec.Scaleway.APIKeySecretRef.Key
+		if keyName == "" {
+			keyName = "SCW_SECRET_KEY"
+		}
+		apiSecretKey = string(secret.Data[keyName])
+		if apiSecretKey == "" {
+			apiSecretKey = string(secret.Data["secret-key"])
+		}
+		if apiSecretKey == "" {
+			return "", fmt.Errorf("Scaleway API key secret %s/%s missing key %s or 'secret-key'", secretKey.Namespace, secretKey.Name, keyName)
+		}
+
+		// Read access key (optional, but recommended)
+		apiAccessKey = string(secret.Data["SCW_ACCESS_KEY"])
+		if apiAccessKey == "" {
+			apiAccessKey = string(secret.Data["access-key"])
+		}
+	}
+
+	// Set env vars for Scaleway SDK (if secret provided)
+	if apiSecretKey != "" {
+		os.Setenv("SCW_SECRET_KEY", apiSecretKey)
+		defer os.Unsetenv("SCW_SECRET_KEY")
+	}
+	if apiAccessKey != "" {
+		os.Setenv("SCW_ACCESS_KEY", apiAccessKey)
+		defer os.Unsetenv("SCW_ACCESS_KEY")
+	}
+
+	provisioner, err := scaleway.NewProvisioner(ctx, zone, nodeClass.Spec.Scaleway.ProjectID, nodeClass.Spec.Scaleway.OrganizationID)
+	if err != nil {
+		logger.Error(err, "unable to create Scaleway provisioner")
+		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "ProvisionerError", fmt.Sprintf("Failed to create provisioner: %v", err))
+		return "", err
+	}
+
+	instanceName := scaleway.GenerateInstanceName(nodeClaim.Name)
+	commercialType := nodeClaim.Spec.Chosen.InstanceType
+	imageFromConfig := nodeClass.Spec.Scaleway.Image
+
+	logger.Info("creating Scaleway instance",
+		"instanceName", instanceName,
+		"commercialType", commercialType,
+		"zone", zone,
+		"image", imageFromConfig,
+	)
+	r.recordEvent(nodeClaim, corev1.EventTypeNormal, "InstanceCreationStarted", fmt.Sprintf("Creating Scaleway instance %s", instanceName))
+
+	instanceID, err := provisioner.CreateInstance(ctx, instanceName, commercialType, zone, startupScript, imageFromConfig)
+	if err != nil {
+		logger.Error(err, "failed to create Scaleway instance")
+		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InstanceCreationFailed", fmt.Sprintf("Failed to create instance: %v", err))
+		r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error())
+		return "", err
+	}
+	return instanceID, nil
+}
+
+// provisionHetznerInstance provisions a Hetzner Cloud instance and returns the instance ID.
+func (r *NodeClaimReconciler) provisionHetznerInstance(ctx context.Context, nodeClaim *cloudburstv1alpha1.NodeClaim, nodeClass *cloudburstv1alpha1.NodeClass, startupScript string, logger logr.Logger) (string, error) {
+	if nodeClass.Spec.Hetzner == nil {
+		err := fmt.Errorf("NodeClass %s spec.hetzner is required for Hetzner provider", nodeClass.Name)
+		logger.Error(err, "missing Hetzner configuration")
+		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InvalidConfiguration", err.Error())
+		r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error())
+		return "", err
+	}
+
+	location := nodeClass.Spec.Hetzner.Location
+	if location == "" {
+		err := fmt.Errorf("NodeClass %s spec.hetzner.location is required", nodeClass.Name)
+		logger.Error(err, "missing Hetzner location")
+		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InvalidConfiguration", err.Error())
+		r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error())
+		return "", err
+	}
+
+	// Get API token from secret if configured
+	var apiToken string
+	if nodeClass.Spec.Hetzner.APITokenSecretRef != nil {
+		secret := &corev1.Secret{}
+		secretKey := client.ObjectKey{
+			Namespace: nodeClaim.Namespace,
+			Name:      nodeClass.Spec.Hetzner.APITokenSecretRef.Name,
+		}
+		if err := r.Get(ctx, secretKey, secret); err != nil {
+			return "", fmt.Errorf("failed to get Hetzner API token secret: %w", err)
+		}
+
+		keyName := nodeClass.Spec.Hetzner.APITokenSecretRef.Key
+		if keyName == "" {
+			keyName = "HETZNER_API_TOKEN"
+		}
+		apiToken = string(secret.Data[keyName])
+		if apiToken == "" {
+			return "", fmt.Errorf("Hetzner API token secret %s/%s missing key %s", secretKey.Namespace, secretKey.Name, keyName)
+		}
+	} else {
+		// Fall back to environment variable
+		apiToken = os.Getenv("HETZNER_API_TOKEN")
+		if apiToken == "" {
+			return "", fmt.Errorf("no Hetzner API token: set spec.hetzner.apiTokenSecretRef or HETZNER_API_TOKEN env var")
+		}
+	}
+
+	provisioner, err := hetzner.NewProvisioner(ctx, apiToken, location)
+	if err != nil {
+		logger.Error(err, "unable to create Hetzner provisioner")
+		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "ProvisionerError", fmt.Sprintf("Failed to create provisioner: %v", err))
+		return "", err
+	}
+
+	instanceName := hetzner.GenerateInstanceName(nodeClaim.Name)
+	serverType := nodeClaim.Spec.Chosen.InstanceType
+	imageFromConfig := nodeClass.Spec.Hetzner.Image
+
+	logger.Info("creating Hetzner instance",
+		"instanceName", instanceName,
+		"serverType", serverType,
+		"location", location,
+		"image", imageFromConfig,
+	)
+	r.recordEvent(nodeClaim, corev1.EventTypeNormal, "InstanceCreationStarted", fmt.Sprintf("Creating Hetzner instance %s", instanceName))
+
+	instanceID, err := provisioner.CreateInstance(ctx, instanceName, serverType, location, startupScript, imageFromConfig)
+	if err != nil {
+		logger.Error(err, "failed to create Hetzner instance")
+		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InstanceCreationFailed", fmt.Sprintf("Failed to create instance: %v", err))
+		r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error())
+		return "", err
+	}
+	return instanceID, nil
 }
 
 // handleProvisioning handles NodeClaims in Provisioning phase
@@ -303,7 +499,7 @@ func (r *NodeClaimReconciler) handleProvisioning(ctx context.Context, nodeClaim 
 		return ctrl.Result{}, nil
 	}
 
-	// Get NodeClass for project/zone
+	// Get NodeClass
 	nodeClass := &cloudburstv1alpha1.NodeClass{}
 	nodeClassKey := client.ObjectKey{
 		Namespace: nodeClaim.Namespace,
@@ -314,28 +510,135 @@ func (r *NodeClaimReconciler) handleProvisioning(ctx context.Context, nodeClaim 
 		return ctrl.Result{}, err
 	}
 
-	project := gcp.GetProject(nodeClass.Spec.GCP.Project)
-	zone := gcp.GetZone(nodeClass.Spec.GCP.Zone)
+	provider := nodeClaim.Spec.Chosen.Provider
+	var isRunning bool
+	switch provider {
+	case "gcp":
+		project := gcp.GetProject(nodeClass.Spec.GCP.Project)
+		zone := gcp.GetZone(nodeClass.Spec.GCP.Zone)
+		provisioner, err := gcp.NewProvisioner(ctx, project, zone)
+		if err != nil {
+			logger.Error(err, "unable to create GCP provisioner")
+			return ctrl.Result{}, err
+		}
+		defer provisioner.Close()
+		isRunning, err = provisioner.IsInstanceRunning(ctx, nodeClaim.Status.InstanceID)
+		if err != nil {
+			logger.Error(err, "unable to check GCP instance status")
+			r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InstanceStatusCheckFailed", fmt.Sprintf("Failed to check instance status: %v", err))
+			return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+		}
+	case "scaleway":
+		if nodeClass.Spec.Scaleway == nil {
+			logger.Error(fmt.Errorf("missing Scaleway config"), "unable to check Scaleway instance status")
+			return ctrl.Result{}, fmt.Errorf("NodeClass %s spec.scaleway is required", nodeClass.Name)
+		}
+		zone := nodeClass.Spec.Scaleway.Zone
 
-	// Create provisioner
-	provisioner, err := gcp.NewProvisioner(ctx, project, zone)
-	if err != nil {
-		logger.Error(err, "unable to create GCP provisioner")
-		return ctrl.Result{}, err
-	}
-	defer provisioner.Close()
+		// Fetch Scaleway API keys from secret if APIKeySecretRef is provided (same as in provisionScalewayInstance)
+		var apiSecretKey, apiAccessKey string
+		if nodeClass.Spec.Scaleway.APIKeySecretRef != nil {
+			secret := &corev1.Secret{}
+			secretKey := client.ObjectKey{
+				Namespace: nodeClaim.Namespace,
+				Name:      nodeClass.Spec.Scaleway.APIKeySecretRef.Name,
+			}
+			if err := r.Get(ctx, secretKey, secret); err != nil {
+				logger.Error(err, "failed to get Scaleway API key secret")
+				return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+			}
 
-	// Check if instance is running
-	isRunning, err := provisioner.IsInstanceRunning(ctx, nodeClaim.Status.InstanceID)
-	if err != nil {
-		logger.Error(err, "unable to check instance status")
-		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InstanceStatusCheckFailed", fmt.Sprintf("Failed to check instance status: %v", err))
-		return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+			// Read secret key (required)
+			keyName := nodeClass.Spec.Scaleway.APIKeySecretRef.Key
+			if keyName == "" {
+				keyName = "SCW_SECRET_KEY"
+			}
+			apiSecretKey = string(secret.Data[keyName])
+			if apiSecretKey == "" {
+				apiSecretKey = string(secret.Data["secret-key"])
+			}
+			if apiSecretKey == "" {
+				logger.Error(fmt.Errorf("missing key in secret"), "Scaleway API key secret missing key", "secret", secretKey, "key", keyName)
+				return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+			}
+
+			// Read access key (optional, but recommended)
+			apiAccessKey = string(secret.Data["SCW_ACCESS_KEY"])
+			if apiAccessKey == "" {
+				apiAccessKey = string(secret.Data["access-key"])
+			}
+		}
+
+		// Set env vars for Scaleway SDK (if secret provided)
+		if apiSecretKey != "" {
+			os.Setenv("SCW_SECRET_KEY", apiSecretKey)
+			defer os.Unsetenv("SCW_SECRET_KEY")
+		}
+		if apiAccessKey != "" {
+			os.Setenv("SCW_ACCESS_KEY", apiAccessKey)
+			defer os.Unsetenv("SCW_ACCESS_KEY")
+		}
+
+		provisioner, err := scaleway.NewProvisioner(ctx, zone, nodeClass.Spec.Scaleway.ProjectID, nodeClass.Spec.Scaleway.OrganizationID)
+		if err != nil {
+			logger.Error(err, "unable to create Scaleway provisioner")
+			return ctrl.Result{}, err
+		}
+		isRunning, err = provisioner.IsInstanceRunning(ctx, nodeClaim.Status.InstanceID)
+		if err != nil {
+			logger.Error(err, "unable to check Scaleway instance status")
+			r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InstanceStatusCheckFailed", fmt.Sprintf("Failed to check instance status: %v", err))
+			return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+		}
+	case "hetzner":
+		if nodeClass.Spec.Hetzner == nil {
+			logger.Error(fmt.Errorf("missing Hetzner config"), "unable to check Hetzner instance status")
+			return ctrl.Result{}, fmt.Errorf("NodeClass %s spec.hetzner is required", nodeClass.Name)
+		}
+
+		// Get API token from secret or env
+		var apiToken string
+		if nodeClass.Spec.Hetzner.APITokenSecretRef != nil {
+			secret := &corev1.Secret{}
+			secretKey := client.ObjectKey{
+				Namespace: nodeClaim.Namespace,
+				Name:      nodeClass.Spec.Hetzner.APITokenSecretRef.Name,
+			}
+			if err := r.Get(ctx, secretKey, secret); err != nil {
+				logger.Error(err, "failed to get Hetzner API token secret")
+				return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+			}
+			keyName := nodeClass.Spec.Hetzner.APITokenSecretRef.Key
+			if keyName == "" {
+				keyName = "HETZNER_API_TOKEN"
+			}
+			apiToken = string(secret.Data[keyName])
+			if apiToken == "" {
+				logger.Error(fmt.Errorf("missing key in secret"), "Hetzner API token secret missing key", "key", keyName)
+				return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+			}
+		} else {
+			apiToken = os.Getenv("HETZNER_API_TOKEN")
+		}
+
+		provisioner, err := hetzner.NewProvisioner(ctx, apiToken, nodeClass.Spec.Hetzner.Location)
+		if err != nil {
+			logger.Error(err, "unable to create Hetzner provisioner")
+			return ctrl.Result{}, err
+		}
+		isRunning, err = provisioner.IsInstanceRunning(ctx, nodeClaim.Status.InstanceID)
+		if err != nil {
+			logger.Error(err, "unable to check Hetzner instance status")
+			r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InstanceStatusCheckFailed", fmt.Sprintf("Failed to check instance status: %v", err))
+			return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+		}
+	default:
+		return ctrl.Result{}, fmt.Errorf("unsupported provider: %s", provider)
 	}
 
 	if isRunning {
-		logger.Info("instance is running, transitioning to Joining")
-		r.recordEvent(nodeClaim, corev1.EventTypeNormal, "InstanceRunning", "GCP instance is now running")
+		logger.Info("instance is running, transitioning to Joining", "provider", provider)
+		r.recordEvent(nodeClaim, corev1.EventTypeNormal, "InstanceRunning", fmt.Sprintf("%s instance is now running", provider))
 
 		nodeClaim.Status.Phase = cloudburstv1alpha1.NodeClaimPhaseJoining
 		nodeClaim.Status.Timestamps.LastTransition = metav1.Now()
@@ -350,8 +653,9 @@ func (r *NodeClaimReconciler) handleProvisioning(ctx context.Context, nodeClaim 
 	// Instance not running yet, requeue
 	logger.Info("instance not running yet, requeuing",
 		"instanceID", nodeClaim.Status.InstanceID,
+		"provider", provider,
 		"elapsed", elapsed.String(),
-		"hint", "waiting for GCP instance to reach RUNNING state (VM boot + startup script)",
+		"hint", fmt.Sprintf("waiting for %s instance to reach running state (VM boot + startup script)", provider),
 	)
 	return ctrl.Result{RequeueAfter: RequeueInterval}, nil
 }
@@ -440,6 +744,55 @@ func (r *NodeClaimReconciler) handleJoining(ctx context.Context, nodeClaim *clou
 	}
 
 	logger.Info("found matching node", "nodeName", matchingNode.Name, "matchReason", matchReason)
+
+	// Apply NodePool template labels (and cloudburst metadata) to the joined node so that
+	// scheduler nodeAffinity (e.g. on cloudburst.io/provider) can match this node.
+	// Best-effort: failures here should not block the node from becoming Ready.
+	if nodeClaim.Spec.NodePoolRef != "" {
+		nodePool := &cloudburstv1alpha1.NodePool{}
+		nodePoolKey := client.ObjectKey{
+			Namespace: nodeClaim.Namespace,
+			Name:      nodeClaim.Spec.NodePoolRef,
+		}
+		if err := r.Get(ctx, nodePoolKey, nodePool); err != nil {
+			logger.Error(err, "unable to fetch NodePool for labeling node", "nodePool", nodeClaim.Spec.NodePoolRef)
+		} else {
+			original := matchingNode.DeepCopy()
+			if matchingNode.Labels == nil {
+				matchingNode.Labels = make(map[string]string)
+			}
+
+			// Copy template labels from NodePool.
+			for k, v := range nodePool.Spec.Template.Labels {
+				// Don't overwrite existing labels from bootstrap/cloud provider unless explicitly set in template.
+				if _, exists := matchingNode.Labels[k]; !exists {
+					matchingNode.Labels[k] = v
+				}
+			}
+
+			// Always attach nodepool and nodeclaim labels for debugging / affinity.
+			matchingNode.Labels["cloudburst.io/nodepool"] = nodeClaim.Spec.NodePoolRef
+			matchingNode.Labels["cloudburst.io/nodeclaim"] = nodeClaim.Name
+
+			// Ensure provider label is present; prefer NodePool template but fall back to NodeClaim.Spec.Chosen.Provider.
+			if _, exists := matchingNode.Labels["cloudburst.io/provider"]; !exists {
+				provider := strings.TrimSpace(nodeClaim.Spec.Chosen.Provider)
+				if provider != "" {
+					matchingNode.Labels["cloudburst.io/provider"] = provider
+				}
+			}
+
+			if err := r.Patch(ctx, matchingNode, client.MergeFrom(original)); err != nil {
+				logger.Error(err, "failed to apply NodePool template labels to node", "nodeName", matchingNode.Name)
+			} else {
+				logger.Info("applied NodePool template labels to node",
+					"nodeName", matchingNode.Name,
+					"nodePool", nodeClaim.Spec.NodePoolRef,
+					"labels", matchingNode.Labels,
+				)
+			}
+		}
+	}
 
 	// Check if node is ready
 	var nodeReadyStatus, nodeReadyReason, nodeReadyMessage string

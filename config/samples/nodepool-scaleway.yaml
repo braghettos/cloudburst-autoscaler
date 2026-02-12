@@ -1,0 +1,25 @@
+# Scaleway NodePool: scaling policy for Scaleway provider
+apiVersion: cloudburst.io/v1alpha1
+kind: NodePool
+metadata:
+  name: scaleway-nodepool
+  namespace: default
+spec:
+  requirements:
+    regionConstraint: "EU"
+    arch:
+    - "x86_64"
+    maxPriceEurPerHour: 0.15
+    allowedProviders:
+    - "scaleway"
+  limits:
+    maxNodes: 3
+    minNodes: 0                           # Allow scale-down to zero for testing
+  template:
+    labels:
+      cloudburst.io/nodepool: "scaleway-nodepool"
+      cloudburst.io/provider: "scaleway"
+  disruption:
+    ttlSecondsAfterEmpty: 60              # Scale down 60s after node becomes empty
+    ttlSecondsUntilExpired: 3600
+  weight: 1

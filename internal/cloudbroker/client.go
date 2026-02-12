@@ -47,7 +47,7 @@ type Client struct {
 type RecommendationRequest struct {
 	MinVCPU            int32    `json:"min_vcpu"`
 	MinRAMGb           float64  `json:"min_ram_gb"`
-	Arch               string   `json:"arch"`
+	Arch               *string  `json:"arch,omitempty"` // Optional: only set if pod specifies architecture requirement
 	RegionConstraint   string   `json:"region_constraint"`
 	MaxPriceEurPerHour float64  `json:"max_price_eur_per_hour"`
 	Limit              int32    `json:"limit"`

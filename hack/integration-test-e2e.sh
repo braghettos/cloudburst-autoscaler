@@ -9,10 +9,9 @@ set -euo pipefail
 # After the pod is scheduled, it is deleted. The controller detects the node is empty
 # and removes the NodeClaim (which also deletes the GCP VM), verifying scale-down to zero.
 #
-# Required env vars:
-#   GCP_PROJECT, GOOGLE_APPLICATION_CREDENTIALS, GCP_ZONE
-#   TAILSCALE_AUTHKEY, TAILSCALE_TAILNET
-#   CLOUDBROKER_BASEURL (optional, defaults to http://<host-ip>:8000)
+# Environment Variables:
+#   This script will automatically source .env file if it exists in the project root.
+#   See .env.example for all available configuration options.
 
 # Colors
 RED='\033[0;31m'
@@ -20,8 +19,21 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+# Source .env file if it exists (from project root)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ENV_FILE="${PROJECT_ROOT}/.env"
+
+if [ -f "${ENV_FILE}" ]; then
+    echo -e "${GREEN}[INFO]${NC} Loading environment variables from .env file"
+    # shellcheck source=/dev/null
+    set -a
+    source "${ENV_FILE}"
+    set +a
+fi
+
 # Configuration
-GCP_PROJECT="${GCP_PROJECT:-neon-481711}"
+GCP_PROJECT="${GCP_PROJECT:?GCP_PROJECT must be set (e.g. in .env or environment)}"
 GCP_ZONE="${GCP_ZONE:-us-central1-a}"
 TAILSCALE_AUTHKEY="${TAILSCALE_AUTHKEY:-}"
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-cloudburst}"
@@ -133,21 +145,26 @@ build_and_load_controller_image() {
     docker build -t "${CONTROLLER_IMAGE}" . 2>&1 | tail -5
 
     log_info "Loading image into kind cluster..."
-    local node="${KIND_CLUSTER_NAME}-control-plane"
-
-    # Pipe docker save directly into the kind node's containerd via ctr.
-    # This avoids "kind load" issues with "failed to detect containerd snapshotter".
-    log_info "Importing image into kind node via docker save | ctr import..."
-    docker save "${CONTROLLER_IMAGE}" | docker exec -i "${node}" ctr --namespace=k8s.io images import -
-    log_info "✓ Image imported into kind node"
-
-    # Verify image is available
-    if docker exec "${node}" crictl images 2>/dev/null | grep -q "cloudburst-autoscaler"; then
-        log_info "✓ Image verified in kind node"
-    else
-        log_warn "Image not found via crictl; listing images:"
-        docker exec "${node}" crictl images 2>/dev/null | head -15 || true
-    fi
+    
+    # Load image into all nodes (control-plane and worker nodes)
+    local nodes=("${KIND_CLUSTER_NAME}-control-plane" "${KIND_CLUSTER_NAME}-worker")
+    
+    for node in "${nodes[@]}"; do
+        # Check if node exists (worker node might not exist in older clusters)
+        if docker ps --format '{{.Names}}' | grep -q "^${node}$"; then
+            log_info "Importing image into ${node} via docker save | ctr import..."
+            docker save "${CONTROLLER_IMAGE}" | docker exec -i "${node}" ctr --namespace=k8s.io images import - 2>&1 | grep -v "^$" || true
+            log_info "✓ Image imported into ${node}"
+            
+            # Verify image is available
+            if docker exec "${node}" crictl images 2>/dev/null | grep -q "cloudburst-autoscaler"; then
+                log_info "✓ Image verified in ${node}"
+            else
+                log_warn "Image not found via crictl in ${node}; listing images:"
+                docker exec "${node}" crictl images 2>/dev/null | head -15 || true
+            fi
+        fi
+    done
 }
 
 # ── Deploy Controller ──────────────────────────────────────────────────────────
@@ -249,6 +266,9 @@ spec:
         app: cloudburst-controller
     spec:
       serviceAccountName: controller-manager
+      # Ensure controller runs on the dedicated worker node
+      nodeSelector:
+        cloudburst.io/node: controller-worker
       containers:
       - name: manager
         image: ${CONTROLLER_IMAGE}
@@ -258,10 +278,6 @@ spec:
         env:
         - name: GOOGLE_APPLICATION_CREDENTIALS
           value: /var/run/secrets/gcp/credentials.json
-        - name: GCP_PROJECT
-          value: "${GCP_PROJECT}"
-        - name: GCP_ZONE
-          value: "${GCP_ZONE}"
         - name: CLOUDBROKER_BASEURL
           value: "${cloudbroker_url}"
         - name: TAILSCALE_AUTHKEY
