@@ -159,8 +159,8 @@ func (r *NodeClaimReconciler) handleDeleting(ctx context.Context, nodeClaim *clo
 						r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InstanceDeletionFailed", fmt.Sprintf("Failed to delete instance: %v", err))
 						return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 					}
-				logger.Info("deleted Scaleway instance", "instanceID", nodeClaim.Status.InstanceID)
-				r.recordEvent(nodeClaim, corev1.EventTypeNormal, "InstanceDeleted", fmt.Sprintf("Scaleway instance deleted: %s", nodeClaim.Status.InstanceID))
+					logger.Info("deleted Scaleway instance", "instanceID", nodeClaim.Status.InstanceID)
+					r.recordEvent(nodeClaim, corev1.EventTypeNormal, "InstanceDeleted", fmt.Sprintf("Scaleway instance deleted: %s", nodeClaim.Status.InstanceID))
 				}
 			case "hetzner":
 				if nodeClass.Spec.Hetzner != nil && nodeClass.Spec.Hetzner.Location != "" {
