@@ -101,14 +101,14 @@ func (p *Provisioner) CreateInstance(ctx context.Context, name, commercialType, 
 		DynamicIPRequired: scw.BoolPtr(true),
 	}
 
-	// Explicitly set project/organization on the request when provided.
-	// Some Scaleway APIs require one of these on the request even if the
-	// client has defaults configured.
+	// Explicitly set project on the request when provided.
+	// Scaleway APIs require Project on the request even if the client has
+	// defaults configured.  Organization is deprecated; fall back to it only
+	// when projectID is empty but organizationID was supplied.
 	if p.projectID != "" {
 		req.Project = scw.StringPtr(p.projectID)
-	}
-	if p.organizationID != "" {
-		req.Organization = scw.StringPtr(p.organizationID)
+	} else if p.organizationID != "" {
+		req.Project = scw.StringPtr(p.organizationID)
 	}
 
 	createResp, err := p.api.CreateServer(req, scw.WithContext(ctx))

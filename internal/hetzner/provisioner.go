@@ -116,16 +116,14 @@ func (p *Provisioner) createInstanceOnce(ctx context.Context, name, serverType, 
 
 	// Wait for the create action to complete
 	if result.Action != nil {
-		_, errCh := p.client.Action.WatchProgress(ctx, result.Action)
-		if err := <-errCh; err != nil {
+		if err := p.client.Action.WaitFor(ctx, result.Action); err != nil {
 			return "", fmt.Errorf("failed waiting for server creation: %w", err)
 		}
 	}
 
 	// Wait for any next actions (e.g. network setup)
 	for _, action := range result.NextActions {
-		_, errCh := p.client.Action.WatchProgress(ctx, action)
-		if err := <-errCh; err != nil {
+		if err := p.client.Action.WaitFor(ctx, action); err != nil {
 			return "", fmt.Errorf("failed waiting for server next action: %w", err)
 		}
 	}
@@ -180,8 +178,7 @@ func (p *Provisioner) deleteInstanceOnce(ctx context.Context, instanceID string)
 
 	// Wait for the delete action to complete
 	if result.Action != nil {
-		_, errCh := p.client.Action.WatchProgress(ctx, result.Action)
-		if err := <-errCh; err != nil {
+		if err := p.client.Action.WaitFor(ctx, result.Action); err != nil {
 			return fmt.Errorf("failed waiting for server deletion: %w", err)
 		}
 	}
