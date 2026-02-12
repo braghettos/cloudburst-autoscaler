@@ -4,55 +4,93 @@
 
 <h1 align="center">Cloudburst Autoscaler</h1>
 
-A Kubernetes controller that automatically provisions cloud VMs as worker nodes in response to unschedulable pod demand. When pods cannot be scheduled due to insufficient capacity, the controller requests an optimal instance from [CloudBroker](https://github.com/braghettos/cloudbroker), provisions a VM (GCP or Scaleway), bootstraps it into the cluster via `kubeadm join`, and removes it when no longer needed.
+<p align="center">
+  Kubernetes controller that automatically provisions cloud VMs as worker nodes in response to unschedulable pod demand &mdash; and removes them when no longer needed.
+</p>
 
 ## Architecture
 
+```mermaid
+graph TB
+    POD["Pending Pod<br/>(unschedulable)"]
+
+    subgraph Controllers ["Cloudburst Controllers"]
+        DD["Demand Detector<br/>(watches pods)"]
+        NPC["NodePool Controller<br/>(scale-up / scale-down)"]
+        NCC["NodeClaim Controller<br/>(VM lifecycle)"]
+    end
+
+    CB["CloudBroker API<br/>(instance recommendation)"]
+
+    subgraph Providers ["Cloud Providers"]
+        GCP["GCP<br/>Compute Engine"]
+        SCW["Scaleway<br/>Instances"]
+        HTZ["Hetzner<br/>Cloud"]
+    end
+
+    BS["Bootstrap<br/>(cloud-init + kubeadm join<br/>over Tailscale)"]
+    NODE["New K8s Node<br/>(Ready)"]
+
+    POD -->|"detected"| DD
+    DD -->|"enqueue"| NPC
+    NPC -->|"POST /api/recommendations"| CB
+    CB -->|"cheapest instance"| NPC
+    NPC -->|"create NodeClaim"| NCC
+    NCC -->|"provision VM"| Providers
+    Providers --> BS
+    BS -->|"node joins cluster"| NODE
+    NODE -->|"pod scheduled"| POD
+
+    NPC -->|"scale-down: delete NodeClaim"| NCC
+    NCC -->|"cordon + drain + delete VM"| Providers
+
+    style Controllers fill:#e8f4f8,stroke:#2196F3,color:#000
+    style Providers fill:#fff3e0,stroke:#FF9800,color:#000
+    style CB fill:#f3e5f5,stroke:#9C27B0,color:#000
+    style BS fill:#e8f5e9,stroke:#4CAF50,color:#000
 ```
-                          +------------------+
-                          |  Pending Pod     |
-                          |  (unschedulable) |
-                          +--------+---------+
-                                   |
-                          watches pods
-                                   |
-                    +--------------v--------------+
-                    |   NodePool Controller       |
-                    |   (demand detection +       |
-                    |    scale-up / scale-down)   |
-                    +--------------+--------------+
-                                   |
-                     creates / deletes NodeClaim
-                                   |
-                    +--------------v--------------+
-                    |   NodeClaim Controller      |
-                    |   (lifecycle management)    |
-                    +--------------+--------------+
-                           |               |
-              +------------+    +----------+----------+
-              |                 |                      |
-     +--------v-------+ +------v--------+   +---------v--------+
-     | CloudBroker    | | GCP           |   | Bootstrap        |
-     | (instance      | | Provisioner   |   | (kubeadm join    |
-     |  selection)    | | (VM create/   |   |  startup script) |
-     +----------------+ |  delete)      |   +------------------+
-                        +---------------+
-```
+
+### How it works
+
+**Scale-up:**
+
+1. A pod is created that cannot be scheduled (insufficient CPU/memory).
+2. `DemandDetector` detects the unschedulable pod and enqueues the `NodePool`.
+3. `NodePool` controller calculates required capacity and calls [CloudBroker](https://github.com/braghettos/cloudbroker) for the cheapest matching instance.
+4. A `NodeClaim` CR is created with the recommended instance details.
+5. `NodeClaim` controller provisions a VM on the selected provider (GCP, Scaleway, or Hetzner).
+6. The VM runs a cloud-init script that installs containerd, kubelet, kubeadm, joins Tailscale, and runs `kubeadm join`.
+7. Once the node reports `Ready`, the pending pod is scheduled onto it.
+
+**Scale-down:**
+
+1. `NodePool` controller periodically checks active nodes (every 30s).
+2. If a node is empty (no non-DaemonSet pods) and `ttlSecondsAfterEmpty` has elapsed, deletion is triggered.
+3. `NodeClaim` controller cordons the node, drains it, deletes the Kubernetes node object, and deletes the cloud VM.
+
+## Features
+
+- **Multi-provider** &mdash; GCP Compute Engine, Scaleway Instances, Hetzner Cloud (more planned)
+- **Cost-optimised** &mdash; CloudBroker picks the cheapest instance across all configured providers
+- **Automatic lifecycle** &mdash; full scale-up and scale-down without manual intervention
+- **Tailscale networking** &mdash; VMs join the cluster over a private Tailscale mesh (works with Kind, EKS, GKE, etc.)
+- **CRD-driven** &mdash; NodePool, NodeClass, and NodeClaim resources for declarative configuration
+- **Safe scale-down** &mdash; cordon, drain, then delete; respects TTL policies
 
 ### Custom Resource Definitions
 
 | CRD | Purpose |
 |-----|---------|
-| **NodePool** | Defines scaling policy: instance requirements (CPU, RAM, price, arch), limits (min/max nodes), and disruption settings (TTL after empty, TTL until expired). |
-| **NodeClass** | Defines infrastructure: GCP project/zone, image family, cluster join config (API server address, token TTL), Tailscale auth, and Kubernetes version. |
-| **NodeClaim** | Represents a single provisioned node. Created automatically by the NodePool controller when demand is detected. Lifecycle: `Pending` -> `Provisioning` -> `Joining` -> `Ready` -> `Deleting`. |
+| **NodePool** | Scaling policy: instance requirements (CPU, RAM, price, arch, allowed providers), limits (min/max nodes), disruption settings (TTL after empty, TTL until expired). |
+| **NodeClass** | Infrastructure config: provider credentials and settings (GCP project/zone, Scaleway zone/project, Hetzner location/token), cluster join config, Tailscale auth, Kubernetes version. |
+| **NodeClaim** | Represents a single provisioned node. Created automatically by the NodePool controller. Lifecycle: `Pending` &rarr; `Provisioning` &rarr; `Joining` &rarr; `Ready` &rarr; `Deleting`. |
 
 ### Controllers
 
 | Controller | Watches | Responsibility |
 |-----------|---------|---------------|
-| **NodePool** | Pods, NodeClaims, NodePools | Detects unschedulable pods, calculates required capacity, creates/deletes NodeClaims. Periodically re-checks for scale-down when active nodes exist. |
-| **NodeClaim** | NodeClaims, Nodes | Manages the full VM lifecycle: calls CloudBroker for instance recommendation, provisions GCP VM with bootstrap script, monitors node join, handles deletion (cordon, drain, delete VM). |
+| **NodePool** | Pods, NodeClaims, NodePools | Detects unschedulable pods, calculates required capacity, creates/deletes NodeClaims. Periodically re-checks for scale-down. |
+| **NodeClaim** | NodeClaims, Nodes | Manages full VM lifecycle: calls CloudBroker, provisions VM with bootstrap script, monitors node join, handles deletion (cordon, drain, delete VM). |
 | **NodeClass** | NodeClasses | Validates and reconciles NodeClass configuration. |
 | **DemandDetector** | Pods | Enqueues NodePool reconciliation when pod scheduling state changes. |
 
@@ -61,96 +99,37 @@ A Kubernetes controller that automatically provisions cloud VMs as worker nodes 
 All identifiers for a provisioned node are identical:
 
 ```
-cb-<nodepool-name>-<k8s-suffix>
+cb-<nodepool-name>-<random-suffix>
 ```
 
-- **NodeClaim name** = **K8s Node name** = **GCP VM instance name**
-- The `cb-` prefix identifies cloudburst-managed resources
+- **NodeClaim name** = **K8s Node name** = **Cloud VM instance name**
+- The `cb-` prefix identifies Cloudburst-managed resources
 - Example: `cb-production-pool-x7kq2`
 
-### Scale-Up Flow
+## Tech Stack
 
-1. A pod is created that cannot be scheduled (insufficient CPU/memory)
-2. `DemandDetector` detects the unschedulable pod and enqueues the `NodePool`
-3. `NodePool` controller calculates required capacity from pod requests
-4. Controller calls CloudBroker API to find the cheapest matching instance
-5. A `NodeClaim` CR is created with the recommended instance details
-6. `NodeClaim` controller provisions a GCP VM with a cloud-init script that:
-   - Installs containerd, kubelet, kubeadm
-   - Configures Tailscale for network connectivity
-   - Runs `kubeadm join` to join the cluster
-   - Sets up fallback CNI if needed
-7. Once the node reports `Ready`, the NodeClaim transitions to `Ready`
-8. The previously pending pod is scheduled onto the new node
+| Layer | Technology |
+|-------|-----------|
+| Language | Go 1.21+ |
+| Framework | controller-runtime (Kubebuilder) |
+| CRDs | NodePool, NodeClass, NodeClaim |
+| Cloud SDKs | google-cloud-go, scaleway-sdk-go, hcloud-go |
+| Networking | Tailscale |
+| Bootstrap | kubeadm + cloud-init |
+| Containerisation | Docker |
+| CI | GitHub Actions (lint, test, Docker build + push to GHCR) |
 
-### Scale-Down Flow
+## Quick Start
 
-1. `NodePool` controller periodically checks active nodes (every 30s)
-2. For each `Ready` NodeClaim, checks if the node is empty (no non-DaemonSet pods)
-3. If empty and `ttlSecondsAfterEmpty` has elapsed since `ReadyAt`, initiates deletion
-4. `NodeClaim` controller cordons the node, drains remaining pods, deletes the K8s Node object, deletes the GCP VM, and removes the NodeClaim CR
-
-## Project Structure
-
-```
-.
-├── main.go                          # Controller manager entry point
-├── api/v1alpha1/                    # CRD type definitions
-│   ├── nodeclaim_types.go
-│   ├── nodeclass_types.go
-│   └── nodepool_types.go
-├── internal/
-│   ├── controller/                  # Reconciliation logic
-│   │   ├── nodepool_controller.go   # Scale-up/down decisions
-│   │   ├── nodeclaim_controller.go  # VM lifecycle management
-│   │   ├── nodeclaim_deletion.go    # Cordon, drain, delete logic
-│   │   ├── nodeclass_controller.go  # NodeClass validation
-│   │   └── demand_detector_controller.go  # Pod watch -> NodePool enqueue
-│   ├── bootstrap/                   # VM bootstrap script generation
-│   │   ├── join.go                  # kubeadm token + discovery kubeconfig
-│   │   └── startup_script.go        # Full cloud-init script builder
-│   ├── cloudbroker/                 # CloudBroker API client
-│   │   └── client.go
-│   ├── gcp/                         # GCP Compute Engine provisioner
-│   │   ├── provisioner.go
-│   │   └── instance_status.go
-│   ├── scaleway/                    # Scaleway instance provisioner
-│   │   └── provisioner.go
-│   ├── planner/                     # Capacity planning utilities
-│   │   └── planner.go
-│   └── tailscale/                   # Tailscale API client
-│       └── client.go
-├── config/                          # Kubernetes manifests (kustomize)
-│   ├── crd/                         # CRD definitions
-│   ├── rbac/                        # RBAC rules
-│   ├── manager/                     # Controller Deployment
-│   ├── cloudbroker/                 # CloudBroker ConfigMap
-│   ├── default/                     # Kustomize overlay (combines all)
-│   └── samples/                     # Example CRs (GCP + Scaleway)
-├── hack/                            # Development scripts
-│   ├── create-kind.sh               # Create local Kind cluster
-│   ├── integration-test.sh          # NodeClaim lifecycle test
-│   ├── integration-test-e2e.sh      # Full E2E test (scale-up + scale-down)
-│   └── test-multi-provider.sh       # Multi-provider test (GCP + Scaleway)
-└── docs/                            # Additional documentation
-    ├── E2E_MANUAL_TEST.md           # Manual E2E testing guide
-    ├── architecture.md
-    ├── provider-selection.md
-    └── tailscale-kind-gcp.md
-```
-
-## Prerequisites
+### Prerequisites
 
 - Go 1.21+
 - Docker
 - kubectl
 - [Kind](https://kind.sigs.k8s.io/) (for local development)
 - [Tailscale](https://tailscale.com/) (for node-to-control-plane networking)
-- GCP service account with Compute Engine permissions (for GCP provider)
-- Scaleway API keys (for Scaleway provider)
 - [CloudBroker](https://github.com/braghettos/cloudbroker) instance running
-
-## Quick Start
+- Provider credentials (at least one): GCP service account, Scaleway API keys, or Hetzner API token
 
 ### Build
 
@@ -163,61 +142,41 @@ make generate           # Generate DeepCopy methods
 
 ### Deploy to a Cluster
 
-**Prerequisites:**
-Create a `.env` file from `.env.example` and configure required variables:
+Create a `.env` file from `.env.example`:
+
 ```bash
 cp .env.example .env
 # Edit .env with your values:
-#   - GOOGLE_APPLICATION_CREDENTIALS (path to GCP service account JSON)
-#   - TAILSCALE_AUTHKEY (Tailscale auth key)
-#
-# Note: GCP_PROJECT and GCP_ZONE are configured in NodeClass resources,
-#       not in the .env file
+#   - TAILSCALE_AUTHKEY (required)
+#   - GOOGLE_APPLICATION_CREDENTIALS (for GCP)
+#   - HETZNER_API_TOKEN (for Hetzner)
+#   - SCW_ACCESS_KEY / SCW_SECRET_KEY (for Scaleway)
 ```
 
-**Local Kind Deploy (Recommended for development):**
+**Local Kind deploy (recommended for development):**
+
 ```bash
-# Create Kind cluster, build image locally, load into Kind, and deploy everything
 make kind-setup-and-deploy IMG=cloudburst-autoscaler:latest
 ```
 
-**Build & Deploy (auto-detects Kind vs registry):**
+**Build and deploy (auto-detects Kind vs registry):**
+
 ```bash
-# Builds image, detects Kind cluster (loads locally) or pushes to registry, deploys
 make build-and-deploy IMG=cloudburst-autoscaler:latest
 ```
 
-**Deploy Only (image must already exist):**
-```bash
-make deploy-all IMG=cloudburst-autoscaler:latest
-```
+**Step-by-step:**
 
-**Step-by-Step Deploy:**
 ```bash
 make create-secrets        # Create namespace and secrets (from .env)
 make install               # Install CRDs
 make deploy IMG=...        # Deploy the controller
-make undeploy              # Undeploy
 ```
 
-**Override Variables:**
-```bash
-make deploy-all \
-  IMG=my-registry/cloudburst:latest \
-  GCP_CREDENTIALS_FILE=/custom/path/gcp-sa.json \
-  TAILSCALE_AUTHKEY=tskey-auth-...
-```
-
-**Note:** The Makefile reads `GOOGLE_APPLICATION_CREDENTIALS` and `TAILSCALE_AUTHKEY` from `.env`. See [docs/E2E_MANUAL_TEST.md](docs/E2E_MANUAL_TEST.md) for full testing instructions.
-
-### Run Locally (development)
+### Run Locally
 
 ```bash
-# Create a Kind cluster with Tailscale connectivity
 ./hack/create-kind.sh
-
-# Run the controller against the Kind cluster
-export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
 export TAILSCALE_AUTHKEY=tskey-auth-...
 export CLOUDBROKER_BASEURL=http://localhost:8000
 make run
@@ -226,26 +185,64 @@ make run
 ### Integration Tests
 
 ```bash
-# Required environment variables (see .env.example)
-export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
-export TAILSCALE_AUTHKEY=tskey-auth-...
+# Full E2E test (GCP): pod triggers autoscaling, then scale-down
+./hack/integration-test-e2e.sh
+
+# Full E2E test (Hetzner Cloud)
+./hack/integration-test-e2e-hetzner.sh
+
+# Multi-provider test (GCP + Scaleway)
+./hack/test-multi-provider.sh
 
 # NodeClaim lifecycle test (manual NodeClaim creation)
 ./hack/integration-test.sh
+```
 
-# Full E2E test (pod triggers autoscaling, then scale-down)
-./hack/integration-test-e2e.sh
+## Project Structure
+
+```
+.
+├── main.go                          # Controller manager entry point
+├── api/v1alpha1/                    # CRD type definitions
+│   ├── nodeclaim_types.go
+│   ├── nodeclass_types.go
+│   └── nodepool_types.go
+├── internal/
+│   ├── controller/                  # Reconciliation logic
+│   │   ├── nodepool_controller.go   # Scale-up / scale-down decisions
+│   │   ├── nodeclaim_controller.go  # VM lifecycle management
+│   │   ├── nodeclaim_deletion.go    # Cordon, drain, delete logic
+│   │   ├── nodeclass_controller.go  # NodeClass validation
+│   │   └── demand_detector_controller.go
+│   ├── bootstrap/                   # VM bootstrap script generation
+│   │   ├── join.go                  # kubeadm token + discovery kubeconfig
+│   │   └── startup_script.go        # Full cloud-init script builder
+│   ├── cloudbroker/                 # CloudBroker API client
+│   ├── gcp/                         # GCP Compute Engine provisioner
+│   ├── scaleway/                    # Scaleway Instances provisioner
+│   ├── hetzner/                     # Hetzner Cloud provisioner
+│   ├── planner/                     # Capacity planning utilities
+│   └── tailscale/                   # Tailscale API client
+├── config/                          # Kubernetes manifests (Kustomize)
+│   ├── crd/                         # CRD definitions
+│   ├── rbac/                        # RBAC rules
+│   ├── manager/                     # Controller Deployment
+│   ├── cloudbroker/                 # CloudBroker ConfigMap
+│   └── samples/                     # Example CRs
+├── hack/                            # Development and test scripts
+│   ├── create-kind.sh               # Create local Kind cluster
+│   ├── integration-test.sh          # NodeClaim lifecycle test
+│   ├── integration-test-e2e.sh      # Full E2E test (GCP)
+│   ├── integration-test-e2e-hetzner.sh  # Full E2E test (Hetzner)
+│   └── test-multi-provider.sh       # Multi-provider test
+└── docs/                            # Additional documentation
 ```
 
 ## Configuration
 
-### Controller Configuration
+### Controller Kubernetes Resources
 
-The controller requires the following Kubernetes resources:
-
-#### CloudBroker ConfigMap (`cloudbroker-config`)
-
-Configures the CloudBroker API connection:
+**CloudBroker ConfigMap** (`cloudbroker-config`):
 
 ```yaml
 apiVersion: v1
@@ -254,40 +251,54 @@ metadata:
   name: cloudbroker-config
   namespace: cloudburst-system
 data:
-  baseurl: "http://cloudbroker-service:8000"  # CloudBroker API URL
-  timeout-seconds: "5"  # Optional: API request timeout
+  baseurl: "http://cloudbroker-service:8000"
+  timeout-seconds: "5"
 ```
 
-#### Secrets
+**Secrets** (created automatically by `make create-secrets` from `.env`):
 
-- **GCP Credentials** (`gcp-credentials`): Secret containing GCP service account JSON key
-  - Key: `credentials.json`
-  - Mounted at: `/var/run/secrets/gcp/credentials.json`
-- **Tailscale Auth Key** (`tailscale-auth`): Secret containing Tailscale auth key
-  - Key: `authkey`
+| Secret | Key | Description |
+|--------|-----|-------------|
+| `gcp-credentials` | `credentials.json` | GCP service account JSON key |
+| `tailscale-auth` | `authkey` | Tailscale auth key |
+| `hetzner-api-token` | `HETZNER_API_TOKEN` | Hetzner Cloud API token |
+| `scaleway-credentials` | `SCW_SECRET_KEY`, `SCW_ACCESS_KEY` | Scaleway API keys |
 
-#### Provider Configuration
-
-Provider-specific configuration (GCP project/zone, Scaleway project ID/zone/organization ID, etc.) is defined in **NodeClass** resources, not in the controller ConfigMap or environment variables. This allows multiple providers and configurations to coexist.
-
-**Note**: Provider-specific settings like `GCP_PROJECT`, `GCP_ZONE`, `SCW_PROJECT_ID`, and `SCW_DEFAULT_ZONE` should be configured in NodeClass resources, not in the `.env` file.
-
-### Environment Variables (Local Development Only)
-
-When running locally with `make run`, these environment variables are used:
+### Environment Variables (local development)
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GOOGLE_APPLICATION_CREDENTIALS` | Yes | Path to GCP service account JSON key |
 | `TAILSCALE_AUTHKEY` | Yes | Tailscale auth key for node registration |
 | `CLOUDBROKER_BASEURL` | No | CloudBroker API URL (default: `http://localhost:8000`) |
-
-**Note**: `GCP_PROJECT` and `GCP_ZONE` are no longer required as environment variables. These are now specified in NodeClass resources.
+| `GOOGLE_APPLICATION_CREDENTIALS` | GCP only | Path to GCP service account JSON key |
+| `HETZNER_API_TOKEN` | Hetzner only | Hetzner Cloud API token |
+| `SCW_ACCESS_KEY` / `SCW_SECRET_KEY` | Scaleway only | Scaleway API credentials |
 
 ### Example Resources
 
 ```yaml
-# GCP NodeClass example
+# Hetzner NodeClass
+apiVersion: cloudburst.io/v1alpha1
+kind: NodeClass
+metadata:
+  name: hetzner-standard
+spec:
+  hetzner:
+    location: fsn1
+    apiTokenSecretRef:
+      name: hetzner-api-token
+      key: HETZNER_API_TOKEN
+  join:
+    hostApiServer: "https://<tailscale-ip>:6443"
+    tokenTtlMinutes: 60
+  tailscale:
+    authKeySecretRef:
+      name: tailscale-auth
+      key: authkey
+  bootstrap:
+    kubernetesVersion: "1.34.3"
+---
+# GCP NodeClass
 apiVersion: cloudburst.io/v1alpha1
 kind: NodeClass
 metadata:
@@ -296,8 +307,6 @@ spec:
   gcp:
     project: my-project
     zone: us-central1-a
-    imageFamily: ubuntu-2204-lts      # default
-    imageProject: ubuntu-os-cloud     # default
   join:
     hostApiServer: "https://<tailscale-ip>:6443"
     tokenTtlMinutes: 60
@@ -308,7 +317,7 @@ spec:
   bootstrap:
     kubernetesVersion: "1.34.3"
 ---
-# Scaleway NodeClass example
+# Scaleway NodeClass
 apiVersion: cloudburst.io/v1alpha1
 kind: NodeClass
 metadata:
@@ -317,11 +326,9 @@ spec:
   scaleway:
     zone: fr-par-1
     projectID: "your-project-id"
-    organizationID: "your-org-id"  # optional
-    image: ubuntu_jammy  # optional, defaults to Ubuntu 22.04
     apiKeySecretRef:
       name: scaleway-credentials
-      key: SCW_SECRET_KEY  # Secret must contain SCW_SECRET_KEY (required) and SCW_ACCESS_KEY (recommended)
+      key: SCW_SECRET_KEY
   join:
     hostApiServer: "https://<tailscale-ip>:6443"
     tokenTtlMinutes: 60
@@ -332,17 +339,7 @@ spec:
   bootstrap:
     kubernetesVersion: "1.34.3"
 ---
-# Example secret for Scaleway credentials
-apiVersion: v1
-kind: Secret
-metadata:
-  name: scaleway-credentials
-  namespace: default
-type: Opaque
-stringData:
-  SCW_SECRET_KEY: "your-scaleway-secret-key"
-  SCW_ACCESS_KEY: "your-scaleway-access-key"  # Recommended for proper authentication
----
+# NodePool (works with any provider)
 apiVersion: cloudburst.io/v1alpha1
 kind: NodePool
 metadata:
@@ -351,7 +348,7 @@ spec:
   requirements:
     arch: ["x86_64"]
     maxPriceEurPerHour: 0.15
-    allowedProviders: ["gcp"]
+    allowedProviders: ["gcp", "hetzner", "scaleway"]
   limits:
     maxNodes: 5
     minNodes: 0
@@ -362,11 +359,11 @@ spec:
 
 ## Documentation
 
-- [Architecture](docs/architecture.md) -- CRD design, controller interaction, bootstrap process, networking
-- [Provider Selection Flow](docs/provider-selection.md) -- how providers are chosen end-to-end
-- [Tailscale + Kind + GCP Networking](docs/tailscale-kind-gcp.md) -- how VMs reach a local Kind cluster over Tailscale
-- [End-to-End Manual Testing Guide](docs/E2E_MANUAL_TEST.md) -- full step-by-step testing instructions
-- [Multi-Provider Testing Guide](hack/MULTI_PROVIDER_TEST.md) -- testing with GCP and Scaleway simultaneously
+- [Architecture](docs/architecture.md) &mdash; CRD design, controller interaction, bootstrap process, networking
+- [Provider Selection Flow](docs/provider-selection.md) &mdash; how providers are chosen end-to-end
+- [Tailscale + Kind + GCP Networking](docs/tailscale-kind-gcp.md) &mdash; how VMs reach a local Kind cluster over Tailscale
+- [End-to-End Manual Testing Guide](docs/E2E_MANUAL_TEST.md) &mdash; full step-by-step testing instructions
+- [Multi-Provider Testing Guide](hack/MULTI_PROVIDER_TEST.md) &mdash; testing with GCP and Scaleway simultaneously
 
 ## License
 
