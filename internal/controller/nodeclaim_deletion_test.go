@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -46,6 +47,7 @@ func TestHandleDeleting_DeleteFlow(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = cloudburstv1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
+	_ = policyv1.AddToScheme(scheme)
 
 	tests := []struct {
 		name             string
@@ -127,6 +129,7 @@ func TestHandleDeleting_DeleteFlow(t *testing.T) {
 
 			reconciler := &NodeClaimReconciler{
 				Client: fakeClient,
+				Config: LoadConfig(),
 			}
 
 			ctx := context.Background()
@@ -166,6 +169,7 @@ func TestHandleDeleting_DeleteFlow(t *testing.T) {
 func TestCordonAndDrainNode(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
+	_ = policyv1.AddToScheme(scheme)
 
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{
@@ -212,6 +216,7 @@ func TestCordonAndDrainNode(t *testing.T) {
 
 	reconciler := &NodeClaimReconciler{
 		Client: fakeClient,
+		Config: LoadConfig(),
 	}
 
 	ctx := context.Background()

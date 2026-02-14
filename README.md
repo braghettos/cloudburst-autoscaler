@@ -26,6 +26,10 @@ graph TB
         GCP["GCP<br/>Compute Engine"]
         SCW["Scaleway<br/>Instances"]
         HTZ["Hetzner<br/>Cloud"]
+        DO["DigitalOcean<br/>Droplets"]
+        OVH["OVH<br/>Cloud"]
+        AWS["AWS<br/>EC2"]
+        AZ["Azure<br/>VM"]
     end
 
     BS["Bootstrap<br/>(cloud-init + kubeadm join<br/>over Tailscale)"]
@@ -58,7 +62,7 @@ graph TB
 2. `DemandDetector` detects the unschedulable pod and enqueues the `NodePool`.
 3. `NodePool` controller calculates required capacity and calls [CloudBroker](https://github.com/braghettos/cloudbroker) for the cheapest matching instance.
 4. A `NodeClaim` CR is created with the recommended instance details.
-5. `NodeClaim` controller provisions a VM on the selected provider (GCP, Scaleway, or Hetzner).
+5. `NodeClaim` controller provisions a VM on the selected provider (GCP, Scaleway, Hetzner, DigitalOcean, OVH, AWS, or Azure).
 6. The VM runs a cloud-init script that installs containerd, kubelet, kubeadm, joins Tailscale, and runs `kubeadm join`.
 7. Once the node reports `Ready`, the pending pod is scheduled onto it.
 
@@ -70,7 +74,7 @@ graph TB
 
 ## Features
 
-- **Multi-provider** &mdash; GCP Compute Engine, Scaleway Instances, Hetzner Cloud (more planned)
+- **Multi-provider** &mdash; GCP Compute Engine, Scaleway, Hetzner Cloud, DigitalOcean, OVH Cloud, AWS EC2, Azure VM
 - **Cost-optimised** &mdash; CloudBroker picks the cheapest instance across all configured providers
 - **Automatic lifecycle** &mdash; full scale-up and scale-down without manual intervention
 - **Tailscale networking** &mdash; VMs join the cluster over a private Tailscale mesh (works with Kind, EKS, GKE, etc.)
@@ -82,7 +86,7 @@ graph TB
 | CRD | Purpose |
 |-----|---------|
 | **NodePool** | Scaling policy: instance requirements (CPU, RAM, price, arch, allowed providers), limits (min/max nodes), disruption settings (TTL after empty, TTL until expired). |
-| **NodeClass** | Infrastructure config: provider credentials and settings (GCP project/zone, Scaleway zone/project, Hetzner location/token), cluster join config, Tailscale auth, Kubernetes version. |
+| **NodeClass** | Infrastructure config: provider credentials and settings (GCP, Scaleway, Hetzner, DigitalOcean, OVH, AWS, Azure), cluster join config, Tailscale auth, Kubernetes version. Region/zone for provisioning comes from the CloudBroker recommendation; provider region/zone in NodeClass is optional. |
 | **NodeClaim** | Represents a single provisioned node. Created automatically by the NodePool controller. Lifecycle: `Pending` &rarr; `Provisioning` &rarr; `Joining` &rarr; `Ready` &rarr; `Deleting`. |
 
 ### Controllers
@@ -113,7 +117,7 @@ cb-<nodepool-name>-<random-suffix>
 | Language | Go 1.21+ |
 | Framework | controller-runtime (Kubebuilder) |
 | CRDs | NodePool, NodeClass, NodeClaim |
-| Cloud SDKs | google-cloud-go, scaleway-sdk-go, hcloud-go |
+| Cloud SDKs | google-cloud-go, scaleway-sdk-go, hcloud-go, godo (DigitalOcean), go-ovh (OVH), aws-sdk-go-v2 (AWS), azure-sdk-for-go (Azure) |
 | Networking | Tailscale |
 | Bootstrap | kubeadm + cloud-init |
 | Containerisation | Docker |
@@ -151,6 +155,7 @@ cp .env.example .env
 #   - GOOGLE_APPLICATION_CREDENTIALS (for GCP)
 #   - HETZNER_API_TOKEN (for Hetzner)
 #   - SCW_ACCESS_KEY / SCW_SECRET_KEY (for Scaleway)
+#   - DIGITALOCEAN_API_TOKEN (for DigitalOcean)
 ```
 
 **Local Kind deploy (recommended for development):**
@@ -188,8 +193,16 @@ make run
 # Full E2E test (GCP): pod triggers autoscaling, then scale-down
 ./hack/integration-test-e2e.sh
 
-# Full E2E test (Hetzner Cloud)
+# Per-provider E2E tests (scale-up + scale-down on a single provider)
 ./hack/integration-test-e2e-hetzner.sh
+./hack/integration-test-e2e-digitalocean.sh
+./hack/integration-test-e2e-ovh.sh
+./hack/integration-test-e2e-scaleway.sh
+./hack/integration-test-e2e-aws.sh
+./hack/integration-test-e2e-azure.sh
+
+# All-providers: detect enabled providers from env and list per-provider scripts
+./hack/integration-test-e2e-all-providers.sh
 
 # Multi-provider test (GCP + Scaleway)
 ./hack/test-multi-provider.sh
@@ -221,6 +234,7 @@ make run
 │   ├── gcp/                         # GCP Compute Engine provisioner
 │   ├── scaleway/                    # Scaleway Instances provisioner
 │   ├── hetzner/                     # Hetzner Cloud provisioner
+│   ├── digitalocean/                # DigitalOcean Droplets provisioner
 │   ├── planner/                     # Capacity planning utilities
 │   └── tailscale/                   # Tailscale API client
 ├── config/                          # Kubernetes manifests (Kustomize)
@@ -232,9 +246,15 @@ make run
 ├── hack/                            # Development and test scripts
 │   ├── create-kind.sh               # Create local Kind cluster
 │   ├── integration-test.sh          # NodeClaim lifecycle test
-│   ├── integration-test-e2e.sh      # Full E2E test (GCP)
-│   ├── integration-test-e2e-hetzner.sh  # Full E2E test (Hetzner)
-│   └── test-multi-provider.sh       # Multi-provider test
+│   ├── integration-test-e2e.sh           # Full E2E test (GCP)
+│   ├── integration-test-e2e-hetzner.sh   # E2E test (Hetzner)
+│   ├── integration-test-e2e-digitalocean.sh  # E2E test (DigitalOcean)
+│   ├── integration-test-e2e-ovh.sh       # E2E test (OVH)
+│   ├── integration-test-e2e-scaleway.sh  # E2E test (Scaleway)
+│   ├── integration-test-e2e-aws.sh       # E2E test (AWS EC2)
+│   ├── integration-test-e2e-azure.sh     # E2E test (Azure VM)
+│   ├── integration-test-e2e-all-providers.sh  # Detect enabled providers, list E2E scripts
+│   └── test-multi-provider.sh            # Multi-provider test (GCP + Scaleway)
 └── docs/                            # Additional documentation
 ```
 
@@ -262,7 +282,11 @@ data:
 | `gcp-credentials` | `credentials.json` | GCP service account JSON key |
 | `tailscale-auth` | `authkey` | Tailscale auth key |
 | `hetzner-api-token` | `HETZNER_API_TOKEN` | Hetzner Cloud API token |
+| `digitalocean-api-token` | `DIGITALOCEAN_API_TOKEN` | DigitalOcean API token |
 | `scaleway-credentials` | `SCW_SECRET_KEY`, `SCW_ACCESS_KEY` | Scaleway API keys |
+| `ovh-api-credentials` | `OVH_APPLICATION_KEY`, `OVH_APPLICATION_SECRET`, `OVH_CONSUMER_KEY` | OVH API credentials |
+| `aws-credentials` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | AWS IAM credentials |
+| `azure-credentials` | `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` | Azure Service Principal |
 
 ### Environment Variables (local development)
 
@@ -272,7 +296,11 @@ data:
 | `CLOUDBROKER_BASEURL` | No | CloudBroker API URL (default: `http://localhost:8000`) |
 | `GOOGLE_APPLICATION_CREDENTIALS` | GCP only | Path to GCP service account JSON key |
 | `HETZNER_API_TOKEN` | Hetzner only | Hetzner Cloud API token |
+| `DIGITALOCEAN_API_TOKEN` | DigitalOcean only | DigitalOcean API token |
 | `SCW_ACCESS_KEY` / `SCW_SECRET_KEY` | Scaleway only | Scaleway API credentials |
+| `OVH_APPLICATION_KEY`, `OVH_APPLICATION_SECRET`, `OVH_CONSUMER_KEY`, `OVH_PROJECT_ID` | OVH only | OVH API credentials |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `AWS_AMI` | AWS only | AWS EC2 credentials (IAM user needs EC2 permissions) |
+| `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, `AZURE_SUBNET_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` | Azure only | Azure Service Principal and resource IDs |
 
 ### Example Resources
 
@@ -317,6 +345,27 @@ spec:
   bootstrap:
     kubernetesVersion: "1.34.3"
 ---
+# DigitalOcean NodeClass
+apiVersion: cloudburst.io/v1alpha1
+kind: NodeClass
+metadata:
+  name: digitalocean-standard
+spec:
+  digitalocean:
+    region: nyc1
+    apiTokenSecretRef:
+      name: digitalocean-api-token
+      key: DIGITALOCEAN_API_TOKEN
+  join:
+    hostApiServer: "https://<tailscale-ip>:6443"
+    tokenTtlMinutes: 60
+  tailscale:
+    authKeySecretRef:
+      name: tailscale-auth
+      key: authkey
+  bootstrap:
+    kubernetesVersion: "1.34.3"
+---
 # Scaleway NodeClass
 apiVersion: cloudburst.io/v1alpha1
 kind: NodeClass
@@ -339,6 +388,88 @@ spec:
   bootstrap:
     kubernetesVersion: "1.34.3"
 ---
+# OVH NodeClass
+apiVersion: cloudburst.io/v1alpha1
+kind: NodeClass
+metadata:
+  name: ovh-standard
+spec:
+  ovh:
+    projectID: "your-ovh-project-id"
+    applicationKeySecretRef:
+      name: ovh-api-credentials
+      key: OVH_APPLICATION_KEY
+    applicationSecretSecretRef:
+      name: ovh-api-credentials
+      key: OVH_APPLICATION_SECRET
+    consumerKeySecretRef:
+      name: ovh-api-credentials
+      key: OVH_CONSUMER_KEY
+  join:
+    hostApiServer: "https://<tailscale-ip>:6443"
+    tokenTtlMinutes: 60
+  tailscale:
+    authKeySecretRef:
+      name: tailscale-auth
+      key: authkey
+  bootstrap:
+    kubernetesVersion: "1.34.3"
+---
+# AWS NodeClass
+apiVersion: cloudburst.io/v1alpha1
+kind: NodeClass
+metadata:
+  name: aws-standard
+spec:
+  aws:
+    region: eu-west-1
+    ami: ami-xxxxxxxx
+    accessKeyIDSecretRef:
+      name: aws-credentials
+      key: AWS_ACCESS_KEY_ID
+    secretAccessKeySecretRef:
+      name: aws-credentials
+      key: AWS_SECRET_ACCESS_KEY
+  join:
+    hostApiServer: "https://<tailscale-ip>:6443"
+    tokenTtlMinutes: 60
+  tailscale:
+    authKeySecretRef:
+      name: tailscale-auth
+      key: authkey
+  bootstrap:
+    kubernetesVersion: "1.34.3"
+---
+# Azure NodeClass
+apiVersion: cloudburst.io/v1alpha1
+kind: NodeClass
+metadata:
+  name: azure-standard
+spec:
+  azure:
+    subscriptionID: "your-subscription-id"
+    resourceGroup: "your-resource-group"
+    location: westeurope
+    subnetID: "/subscriptions/.../resourceGroups/.../providers/Microsoft.Network/virtualNetworks/.../subnets/default"
+    tenantIDSecretRef:
+      name: azure-credentials
+      key: AZURE_TENANT_ID
+    clientIDSecretRef:
+      name: azure-credentials
+      key: AZURE_CLIENT_ID
+    clientSecretSecretRef:
+      name: azure-credentials
+      key: AZURE_CLIENT_SECRET
+  join:
+    hostApiServer: "https://<tailscale-ip>:6443"
+    tokenTtlMinutes: 60
+  tailscale:
+    authKeySecretRef:
+      name: tailscale-auth
+      key: authkey
+  bootstrap:
+    kubernetesVersion: "1.34.3"
+---
 # NodePool (works with any provider)
 apiVersion: cloudburst.io/v1alpha1
 kind: NodePool
@@ -348,7 +479,7 @@ spec:
   requirements:
     arch: ["x86_64"]
     maxPriceEurPerHour: 0.15
-    allowedProviders: ["gcp", "hetzner", "scaleway"]
+    allowedProviders: ["gcp", "hetzner", "scaleway", "digitalocean"]
   limits:
     maxNodes: 5
     minNodes: 0
@@ -359,10 +490,8 @@ spec:
 
 ## Documentation
 
+- [Article series](docs/articles/) &mdash; four-part intro (problem and product, how it works, interface, scope and run)
 - [Architecture](docs/architecture.md) &mdash; CRD design, controller interaction, bootstrap process, networking
-- [Provider Selection Flow](docs/provider-selection.md) &mdash; how providers are chosen end-to-end
-- [Tailscale + Kind + GCP Networking](docs/tailscale-kind-gcp.md) &mdash; how VMs reach a local Kind cluster over Tailscale
-- [End-to-End Manual Testing Guide](docs/E2E_MANUAL_TEST.md) &mdash; full step-by-step testing instructions
 - [Multi-Provider Testing Guide](hack/MULTI_PROVIDER_TEST.md) &mdash; testing with GCP and Scaleway simultaneously
 
 ## License

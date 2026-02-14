@@ -338,8 +338,8 @@ spec:
   gcp:
     project: "${GCP_PROJECT}"
     zone: "${GCP_ZONE}"
-  imageFamily: "ubuntu-2204-lts"
-  imageProject: "ubuntu-os-cloud"
+    imageFamily: "ubuntu-2204-lts"
+    imageProject: "ubuntu-os-cloud"
   join:
     hostApiServer: "https://${HOST_TS_IP}:6443"
     kindClusterName: "${KIND_CLUSTER_NAME}"
@@ -375,7 +375,7 @@ spec:
   requirements:
     regionConstraint: "ANY"
     arch: ["x86_64"]
-    maxPriceEurPerHour: 0.15
+    maxPriceEurPerHour: 0.50
     allowedProviders: ["gcp"]
   limits:
     maxNodes: 3
@@ -396,9 +396,8 @@ EOF
 create_pending_pod() {
     log_info "Creating resource-hungry pod to trigger autoscaling..."
 
-    # Request enough CPU/memory that the kind control-plane node cannot satisfy.
-    # Kind control-plane typically has ~2 vCPU, but most of it is already used by
-    # kube-system pods. Requesting 1500m CPU + 2Gi memory should be unschedulable.
+    # Use a nodeSelector label that only exists on nodes created by the NodePool,
+    # so this pod cannot be scheduled on existing Kind nodes (control-plane or worker).
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Pod
@@ -408,6 +407,8 @@ metadata:
   labels:
     app: e2e-workload
 spec:
+  nodeSelector:
+    cloudburst.io/nodepool: "${NODEPOOL_NAME}"
   containers:
   - name: workload
     image: busybox:1.36
@@ -416,14 +417,6 @@ spec:
       requests:
         cpu: "1500m"
         memory: "2Gi"
-  # Ensure this pod does NOT get scheduled on the control-plane node
-  affinity:
-    nodeAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        nodeSelectorTerms:
-        - matchExpressions:
-          - key: node-role.kubernetes.io/control-plane
-            operator: DoesNotExist
 EOF
     log_info "✓ Pending pod created"
 

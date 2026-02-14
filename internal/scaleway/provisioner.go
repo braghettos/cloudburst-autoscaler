@@ -19,6 +19,7 @@ package scaleway
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -47,16 +48,30 @@ type Provisioner struct {
 
 // NewProvisioner creates a new Scaleway provisioner.
 // zoneStr, projectID, and organizationID come from NodeClass.Spec.Scaleway.
-// Client credentials (SCW_ACCESS_KEY, SCW_SECRET_KEY) can come from env or secrets.
-func NewProvisioner(ctx context.Context, zoneStr, projectID, organizationID string) (*Provisioner, error) {
+// When both projectID and organizationID are empty, they are read from
+// SCW_DEFAULT_PROJECT_ID and SCW_DEFAULT_ORGANIZATION_ID env vars (thread-safe).
+// When accessKey and secretKey are non-empty, they are used via scw.WithAuth (thread-safe).
+// When both are empty, the client falls back to scw.WithEnv() (SCW_ACCESS_KEY, SCW_SECRET_KEY).
+func NewProvisioner(ctx context.Context, zoneStr, projectID, organizationID, accessKey, secretKey string) (*Provisioner, error) {
 	zone, err := scw.ParseZone(zoneStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid zone %q: %w", zoneStr, err)
 	}
 
+	if projectID == "" {
+		projectID = os.Getenv("SCW_DEFAULT_PROJECT_ID")
+	}
+	if organizationID == "" {
+		organizationID = os.Getenv("SCW_DEFAULT_ORGANIZATION_ID")
+	}
+
 	opts := []scw.ClientOption{
-		scw.WithEnv(),
 		scw.WithDefaultZone(zone),
+	}
+	if accessKey != "" && secretKey != "" {
+		opts = append(opts, scw.WithAuth(accessKey, secretKey))
+	} else {
+		opts = append(opts, scw.WithEnv())
 	}
 	if projectID != "" {
 		opts = append(opts, scw.WithDefaultProjectID(projectID))
@@ -83,6 +98,29 @@ func NewProvisioner(ctx context.Context, zoneStr, projectID, organizationID stri
 // imageFromConfig is optional (e.g. from NodeClass); if empty, defaults to Ubuntu 22.04.
 // Returns instanceID in the form "scaleway/<zone>/<server-id>".
 func (p *Provisioner) CreateInstance(ctx context.Context, name, commercialType, zoneStr, startupScript, imageFromConfig string) (string, error) {
+	var lastErr error
+	for attempt := 0; attempt <= MaxRetries; attempt++ {
+		if attempt > 0 {
+			waitTime := RetryDelay * time.Duration(1<<uint(attempt-1))
+			select {
+			case <-ctx.Done():
+				return "", fmt.Errorf("context cancelled: %w", ctx.Err())
+			case <-time.After(waitTime):
+			}
+		}
+		instanceID, err := p.createInstanceOnce(ctx, name, commercialType, zoneStr, startupScript, imageFromConfig)
+		if err == nil {
+			return instanceID, nil
+		}
+		if !isRetryableError(err) {
+			return "", err
+		}
+		lastErr = err
+	}
+	return "", fmt.Errorf("failed after %d attempts: %w", MaxRetries+1, lastErr)
+}
+
+func (p *Provisioner) createInstanceOnce(ctx context.Context, name, commercialType, zoneStr, startupScript, imageFromConfig string) (string, error) {
 	zone, err := scw.ParseZone(zoneStr)
 	if err != nil {
 		return "", fmt.Errorf("invalid zone: %w", err)
@@ -101,10 +139,6 @@ func (p *Provisioner) CreateInstance(ctx context.Context, name, commercialType, 
 		DynamicIPRequired: scw.BoolPtr(true),
 	}
 
-	// Explicitly set project on the request when provided.
-	// Scaleway APIs require Project on the request even if the client has
-	// defaults configured.  Organization is deprecated; fall back to it only
-	// when projectID is empty but organizationID was supplied.
 	if p.projectID != "" {
 		req.Project = scw.StringPtr(p.projectID)
 	} else if p.organizationID != "" {
@@ -127,19 +161,18 @@ func (p *Provisioner) CreateInstance(ctx context.Context, name, commercialType, 
 			Content:  strings.NewReader(startupScript),
 		}, scw.WithContext(ctx))
 		if err != nil {
-			_ = p.DeleteInstance(ctx, instanceID)
+			_ = p.deleteInstanceOnce(ctx, instanceID)
 			return "", fmt.Errorf("failed to set server user data: %w", err)
 		}
 	}
 
-	// Power on the server (creation may leave it stopped until user data is set)
 	_, err = p.api.ServerAction(&instance.ServerActionRequest{
 		Zone:     zone,
 		ServerID: serverID,
 		Action:   instance.ServerActionPoweron,
 	}, scw.WithContext(ctx))
 	if err != nil {
-		_ = p.DeleteInstance(ctx, instanceID)
+		_ = p.deleteInstanceOnce(ctx, instanceID)
 		return "", fmt.Errorf("failed to power on server: %w", err)
 	}
 
@@ -148,9 +181,75 @@ func (p *Provisioner) CreateInstance(ctx context.Context, name, commercialType, 
 
 // DeleteInstance deletes a Scaleway instance. instanceID must be in the form "scaleway/<zone>/<server-id>".
 func (p *Provisioner) DeleteInstance(ctx context.Context, instanceID string) error {
+	var lastErr error
+	for attempt := 0; attempt <= MaxRetries; attempt++ {
+		if attempt > 0 {
+			waitTime := RetryDelay * time.Duration(1<<uint(attempt-1))
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("context cancelled: %w", ctx.Err())
+			case <-time.After(waitTime):
+			}
+		}
+		err := p.deleteInstanceOnce(ctx, instanceID)
+		if err == nil {
+			return nil
+		}
+		if !isRetryableError(err) {
+			return err
+		}
+		lastErr = err
+	}
+	return fmt.Errorf("failed after %d attempts: %w", MaxRetries+1, lastErr)
+}
+
+func (p *Provisioner) deleteInstanceOnce(ctx context.Context, instanceID string) error {
 	zone, serverID, err := parseInstanceID(instanceID)
 	if err != nil {
 		return err
+	}
+
+	// Scaleway requires the server to be powered off before deletion.
+	// Check state and power off if running.
+	resp, err := p.api.GetServer(&instance.GetServerRequest{
+		Zone:     zone,
+		ServerID: serverID,
+	}, scw.WithContext(ctx))
+	if err != nil {
+		// If the server is already gone (404), treat as success
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") {
+			return nil
+		}
+		return fmt.Errorf("failed to get server state: %w", err)
+	}
+
+	if resp.Server.State == instance.ServerStateRunning || resp.Server.State == instance.ServerStateStarting {
+		_, err = p.api.ServerAction(&instance.ServerActionRequest{
+			Zone:     zone,
+			ServerID: serverID,
+			Action:   instance.ServerActionPoweroff,
+		}, scw.WithContext(ctx))
+		if err != nil {
+			return fmt.Errorf("failed to power off server before deletion: %w", err)
+		}
+		// Wait for server to reach stopped state
+		for i := 0; i < 30; i++ {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("context cancelled while waiting for power off: %w", ctx.Err())
+			case <-time.After(2 * time.Second):
+			}
+			sr, err := p.api.GetServer(&instance.GetServerRequest{
+				Zone:     zone,
+				ServerID: serverID,
+			}, scw.WithContext(ctx))
+			if err != nil {
+				break // server may already be gone
+			}
+			if sr.Server.State == instance.ServerStateStopped || sr.Server.State == instance.ServerStateStoppedInPlace {
+				break
+			}
+		}
 	}
 
 	err = p.api.DeleteServer(&instance.DeleteServerRequest{
@@ -158,6 +257,10 @@ func (p *Provisioner) DeleteInstance(ctx context.Context, instanceID string) err
 		ServerID: serverID,
 	}, scw.WithContext(ctx))
 	if err != nil {
+		// If already gone, treat as success
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") {
+			return nil
+		}
 		return fmt.Errorf("failed to delete server: %w", err)
 	}
 	return nil
@@ -189,6 +292,11 @@ func (p *Provisioner) IsInstanceRunning(ctx context.Context, instanceID string) 
 	return state == instance.ServerStateRunning, nil
 }
 
+// Close releases resources. Scaleway API client has no explicit close; no-op.
+func (p *Provisioner) Close() error {
+	return nil
+}
+
 // GenerateInstanceName returns the Scaleway server name for a NodeClaim.
 // By convention it equals the NodeClaim name (same as GCP) for consistent node naming.
 func GenerateInstanceName(nodeClaimName string) string {
@@ -210,4 +318,18 @@ func parseInstanceID(instanceID string) (scw.Zone, string, error) {
 		return "", "", fmt.Errorf("invalid zone in instance ID: %w", err)
 	}
 	return zone, parts[1], nil
+}
+
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	retryable := []string{"rate limit", "quota", "temporary", "timeout", "deadline exceeded", "unavailable", "503", "502", "500"}
+	for _, r := range retryable {
+		if strings.Contains(errStr, r) {
+			return true
+		}
+	}
+	return false
 }

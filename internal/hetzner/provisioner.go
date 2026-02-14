@@ -212,6 +212,11 @@ func (p *Provisioner) IsInstanceRunning(ctx context.Context, instanceID string) 
 	return status == hcloud.ServerStatusRunning, nil
 }
 
+// Close releases resources. Hetzner client has no explicit close; no-op.
+func (p *Provisioner) Close() error {
+	return nil
+}
+
 // GenerateInstanceName returns the Hetzner server name for a NodeClaim.
 // By convention it equals the NodeClaim name (same as GCP/Scaleway) for consistent node naming.
 func GenerateInstanceName(nodeClaimName string) string {
@@ -235,13 +240,26 @@ func parseInstanceID(instanceID string) (string, int64, error) {
 	return parts[0], serverID, nil
 }
 
-// isRetryableError checks if an error is retryable
+// isRetryableError checks if an error is retryable.
+// Permanent errors like resource_unavailable (location disabled) are excluded.
 func isRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
 
-	errStr := err.Error()
+	errStr := strings.ToLower(err.Error())
+
+	// Non-retryable patterns: permanent failures that will not resolve with retries
+	nonRetryable := []string{
+		"resource_unavailable",
+		"location disabled",
+	}
+	for _, nr := range nonRetryable {
+		if strings.Contains(errStr, nr) {
+			return false
+		}
+	}
+
 	retryableErrors := []string{
 		"rate limit",
 		"quota",
@@ -255,7 +273,7 @@ func isRetryableError(err error) bool {
 	}
 
 	for _, retryable := range retryableErrors {
-		if strings.Contains(strings.ToLower(errStr), retryable) {
+		if strings.Contains(errStr, retryable) {
 			return true
 		}
 	}

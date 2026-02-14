@@ -4,9 +4,7 @@
 
 Cloudburst Autoscaler is a Kubernetes operator built with [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime) that extends a cluster by provisioning cloud VMs on demand. It is inspired by [Karpenter](https://karpenter.sh/) but focused on burst scenarios where workloads temporarily need external compute capacity.
 
-The controller watches for unschedulable pods, consults [CloudBroker](https://github.com/braghettos/cloudbroker) for optimal instance pricing, provisions cloud VMs (GCP, Scaleway), and bootstraps them into the cluster using `kubeadm join` over a Tailscale network.
-
-See [Provider Selection Flow](./provider-selection.md) for details on how providers are chosen.
+The controller watches for unschedulable pods, consults [CloudBroker](https://github.com/braghettos/cloudbroker) for optimal instance pricing, provisions cloud VMs (GCP, Scaleway, Hetzner, DigitalOcean, OVH, AWS, Azure), and bootstraps them into the cluster using `kubeadm join` over a Tailscale network.
 
 ## CRD Design
 
@@ -33,11 +31,16 @@ The **NodeClass** defines infrastructure-level configuration:
 
 - **GCP Config** (optional): Project and zone for GCP VM provisioning
 - **Scaleway Config** (optional): Zone, image, and credentials for Scaleway server provisioning
+- **Hetzner Config** (optional): Location and API token for Hetzner Cloud VMs
+- **DigitalOcean Config** (optional): Region and API token for DigitalOcean Droplets
+- **OVH Config** (optional): Project ID, region, and OAuth credentials for OVH Cloud
+- **AWS Config** (optional): Region, AMI, subnet, security groups for AWS EC2
+- **Azure Config** (optional): Subscription, resource group, location, subnet for Azure VM
 - **Join Config**: Control plane API server address (Tailscale IP), token TTL
 - **Tailscale**: Auth key secret reference for node registration
 - **Bootstrap**: Kubernetes version to install on the VM
 
-NodeClass is automatically matched to the provider from CloudBroker recommendation. A NodeClass must have configuration for at least one provider (GCP or Scaleway).
+NodeClass is automatically matched to the provider from CloudBroker recommendation. A NodeClass must have configuration for at least one provider.
 
 ### NodeClaim
 
@@ -48,7 +51,7 @@ Pending -> Provisioning -> Joining -> Ready -> Deleting
 ```
 
 - **Pending**: CloudBroker recommendation acquired, ready to provision
-- **Provisioning**: GCP VM creation in progress
+- **Provisioning**: Cloud VM creation in progress (GCP, Scaleway, Hetzner, DigitalOcean, OVH, AWS, or Azure)
 - **Joining**: VM is running, waiting for `kubeadm join` to complete and node to report Ready
 - **Ready**: Node is a healthy member of the cluster
 - **Deleting**: Node is being cordoned, drained, and the VM deleted
@@ -64,10 +67,10 @@ Pending -> Provisioning -> Joining -> Ready -> Deleting
                                    └── createNodeClaim() ──> NodeClaim CR
                                                                   │
                                                           NodeClaim Controller
-                                                          ├── handlePending()    → CloudBroker + GCP create
+                                                          ├── handlePending()    → CloudBroker + provider create (GCP, Scaleway, Hetzner, DO, OVH, AWS, Azure)
                                                           ├── handleProvisioning() → wait for VM
                                                           ├── handleJoining()    → wait for K8s node Ready
-                                                          └── handleDeleting()   → cordon + drain + GCP delete
+                                                          └── handleDeleting()   → cordon + drain + provider delete
 ```
 
 ### DemandDetector
@@ -93,15 +96,15 @@ The core scheduling brain:
 
 Manages the full VM lifecycle:
 
-1. **Pending -> Provisioning**: Generates a `kubeadm join` token via the bootstrap package, builds a cloud-init startup script, calls `gcp.Provisioner.CreateInstance()`.
+1. **Pending -> Provisioning**: Generates a `kubeadm join` token via the bootstrap package, builds a cloud-init startup script, and calls the provisioner (created via `internal/provisioner.NewFromNodeClass`) to create the VM (e.g. GCP, Scaleway, Hetzner, DigitalOcean, OVH, AWS, Azure).
 
-2. **Provisioning -> Joining**: Polls the GCP instance status until it's `RUNNING`.
+2. **Provisioning -> Joining**: Polls the cloud instance status until it's running.
 
 3. **Joining -> Ready**: Lists K8s nodes and matches by name (hostname = NodeClaim name). Waits for the node to report `Ready` condition. Has a 20-minute timeout for the entire join process.
 
 4. **Ready**: No-op; node is serving workloads.
 
-5. **Deleting**: Cordons the node, drains non-DaemonSet pods, deletes the K8s Node object, calls `gcp.Provisioner.DeleteInstance()`, and finally deletes the NodeClaim CR.
+5. **Deleting**: Cordons the node, drains non-DaemonSet pods, deletes the K8s Node object, calls the provisioner's `DeleteInstance()`, and finally deletes the NodeClaim CR.
 
 ## Bootstrap Process
 
@@ -138,6 +141,20 @@ The `cb-` prefix enables:
 - Easy identification of cloudburst-managed resources
 - Simple GCP cleanup queries (`name~^cb-`)
 - Consistent correlation across `kubectl`, `gcloud`, and logs
+
+## Provisioner Interface
+
+All cloud providers implement the common `Provisioner` interface (`internal/provisioner/provisioner.go`): `CreateInstance`, `DeleteInstance`, `IsInstanceRunning`, and `Close`. The controller uses `provisioner.NewFromNodeClass()` to build the correct provisioner from the NodeClaim's chosen provider and the NodeClass spec (credentials are read from Kubernetes secrets or environment). This keeps the controller free of per-provider switch logic.
+
+## E2E Tests
+
+Per-provider E2E scripts in `hack/` run a full scale-up and scale-down cycle on a single Kind cluster:
+
+- `integration-test-e2e.sh` (GCP)
+- `integration-test-e2e-hetzner.sh`, `integration-test-e2e-digitalocean.sh`, `integration-test-e2e-ovh.sh`
+- `integration-test-e2e-scaleway.sh`, `integration-test-e2e-aws.sh`, `integration-test-e2e-azure.sh`
+
+`integration-test-e2e-all-providers.sh` detects which providers have credentials set and lists the corresponding per-provider scripts.
 
 ## External Dependencies
 

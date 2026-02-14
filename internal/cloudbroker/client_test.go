@@ -191,10 +191,14 @@ func TestRecommend_Success(t *testing.T) {
 		Limit:              10,
 	}
 
-	result, err := client.Recommend(context.Background(), &req)
+	results, err := client.Recommend(context.Background(), &req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if len(results) == 0 {
+		t.Fatal("expected at least one recommendation, got none")
+	}
+	result := results[0]
 
 	// Verify result (should be top recommendation)
 	if result.Provider != "gcp" {
@@ -327,13 +331,15 @@ func TestRecommend_RetryOnFailure(t *testing.T) {
 		Limit:              10,
 	}
 
-	result, err := client.Recommend(context.Background(), &req)
+	results, err := client.Recommend(context.Background(), &req)
 	if err != nil {
 		t.Fatalf("unexpected error after retry: %v", err)
 	}
-
-	if result.Provider != "gcp" {
-		t.Errorf("expected provider gcp, got %s", result.Provider)
+	if len(results) == 0 {
+		t.Fatal("expected at least one recommendation, got none")
+	}
+	if results[0].Provider != "gcp" {
+		t.Errorf("expected provider gcp, got %s", results[0].Provider)
 	}
 
 	if attemptCount != 2 {

@@ -35,6 +35,22 @@ type NodeClassSpec struct {
 	// +optional
 	Hetzner *HetznerConfig `json:"hetzner,omitempty"`
 
+	// DigitalOcean configuration (used when NodeClaim Chosen.Provider is digitalocean)
+	// +optional
+	DigitalOcean *DigitalOceanConfig `json:"digitalocean,omitempty"`
+
+	// OVH Cloud configuration (used when NodeClaim Chosen.Provider is ovh)
+	// +optional
+	OVH *OVHConfig `json:"ovh,omitempty"`
+
+	// AWS configuration (used when NodeClaim Chosen.Provider is aws)
+	// +optional
+	AWS *AWSConfig `json:"aws,omitempty"`
+
+	// Azure configuration (used when NodeClaim Chosen.Provider is azure)
+	// +optional
+	Azure *AzureConfig `json:"azure,omitempty"`
+
 	// Join configuration for joining the Kubernetes cluster
 	Join JoinConfig `json:"join"`
 
@@ -51,8 +67,14 @@ type GCPConfig struct {
 	// Project is the GCP project ID
 	Project string `json:"project"`
 
-	// Zone is the GCP zone
-	Zone string `json:"zone"`
+	// Zone is the GCP zone (optional when region comes from CloudBroker recommendation; used as fallback)
+	// +optional
+	Zone string `json:"zone,omitempty"`
+
+	// PreferredZoneSuffix is the zone suffix to append to a region when CloudBroker returns a region (e.g. "europe-west1") and GCP requires a zone (e.g. "europe-west1-b"). Defaults to "-b".
+	// +optional
+	// +kubebuilder:default="-b"
+	PreferredZoneSuffix string `json:"preferredZoneSuffix,omitempty"`
 
 	// ImageFamily is the image family to use (default: ubuntu-2204-lts)
 	// +kubebuilder:default=ubuntu-2204-lts
@@ -65,8 +87,9 @@ type GCPConfig struct {
 
 // ScalewayConfig defines Scaleway-specific configuration
 type ScalewayConfig struct {
-	// Zone is the Scaleway zone (e.g. fr-par-1, nl-ams-1)
-	Zone string `json:"zone"`
+	// Zone is the Scaleway zone (optional when region comes from CloudBroker recommendation; used as fallback)
+	// +optional
+	Zone string `json:"zone,omitempty"`
 
 	// ProjectID is the Scaleway project ID (optional; can use default from credentials)
 	// +optional
@@ -92,8 +115,9 @@ type ScalewayConfig struct {
 
 // HetznerConfig defines Hetzner Cloud-specific configuration
 type HetznerConfig struct {
-	// Location is the Hetzner Cloud datacenter location (e.g. "fsn1", "nbg1", "hel1")
-	Location string `json:"location"`
+	// Location is the Hetzner Cloud datacenter location (optional when region comes from CloudBroker recommendation; used as fallback)
+	// +optional
+	Location string `json:"location,omitempty"`
 
 	// APITokenSecretRef references a secret containing the Hetzner Cloud API token.
 	// Secret must have the key specified (default "HETZNER_API_TOKEN").
@@ -103,6 +127,114 @@ type HetznerConfig struct {
 	// Image is the Hetzner Cloud image name or ID (default: "ubuntu-22.04")
 	// +optional
 	Image string `json:"image,omitempty"`
+}
+
+// DigitalOceanConfig defines DigitalOcean-specific configuration
+type DigitalOceanConfig struct {
+	// Region is the DigitalOcean region slug (optional when region comes from CloudBroker recommendation; used as fallback)
+	// +optional
+	Region string `json:"region,omitempty"`
+
+	// APITokenSecretRef references a secret containing the DigitalOcean API token.
+	// Secret must have the key specified (default "DIGITALOCEAN_API_TOKEN").
+	// +optional
+	APITokenSecretRef *corev1.SecretKeySelector `json:"apiTokenSecretRef,omitempty"`
+
+	// Image is the DigitalOcean image slug (default: "ubuntu-22-04-x64")
+	// +optional
+	Image string `json:"image,omitempty"`
+}
+
+// OVHConfig defines OVH Cloud-specific configuration
+type OVHConfig struct {
+	// ProjectID is the OVH Cloud project ID (serviceName)
+	ProjectID string `json:"projectID"`
+
+	// Region is the OVH Cloud region (optional when region comes from CloudBroker recommendation; used as fallback)
+	// +optional
+	Region string `json:"region,omitempty"`
+
+	// ApplicationKeySecretRef references a secret containing the OVH application key.
+	// +optional
+	ApplicationKeySecretRef *corev1.SecretKeySelector `json:"applicationKeySecretRef,omitempty"`
+
+	// ApplicationSecretSecretRef references a secret containing the OVH application secret.
+	// +optional
+	ApplicationSecretSecretRef *corev1.SecretKeySelector `json:"applicationSecretSecretRef,omitempty"`
+
+	// ConsumerKeySecretRef references a secret containing the OVH consumer key.
+	// +optional
+	ConsumerKeySecretRef *corev1.SecretKeySelector `json:"consumerKeySecretRef,omitempty"`
+
+	// ImageID is the OVH image identifier (default: "Ubuntu 22.04")
+	// +optional
+	ImageID string `json:"imageID,omitempty"`
+
+	// Endpoint is the OVH API endpoint (e.g. "ovh-eu", "ovh-ca"). Defaults to "ovh-eu".
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+}
+
+// AWSConfig defines AWS EC2-specific configuration
+type AWSConfig struct {
+	// Region is the AWS region (optional when region comes from CloudBroker recommendation; used as fallback)
+	// +optional
+	Region string `json:"region,omitempty"`
+
+	// AMI is the Amazon Machine Image ID (required for EC2)
+	AMI string `json:"ami"`
+
+	// SubnetID is the VPC subnet ID for the instance (optional; uses default if empty)
+	// +optional
+	SubnetID string `json:"subnetID,omitempty"`
+
+	// SecurityGroupIDs are the security group IDs to attach to the instance (optional)
+	// +optional
+	SecurityGroupIDs []string `json:"securityGroupIDs,omitempty"`
+
+	// InstanceProfileARN is the IAM instance profile ARN (optional)
+	// +optional
+	InstanceProfileARN string `json:"instanceProfileARN,omitempty"`
+
+	// AccessKeyIDSecretRef references a secret containing the AWS access key ID.
+	// +optional
+	AccessKeyIDSecretRef *corev1.SecretKeySelector `json:"accessKeyIDSecretRef,omitempty"`
+
+	// SecretAccessKeySecretRef references a secret containing the AWS secret access key.
+	// +optional
+	SecretAccessKeySecretRef *corev1.SecretKeySelector `json:"secretAccessKeySecretRef,omitempty"`
+}
+
+// AzureConfig defines Azure VM-specific configuration
+type AzureConfig struct {
+	// SubscriptionID is the Azure subscription ID
+	SubscriptionID string `json:"subscriptionID"`
+
+	// ResourceGroup is the resource group for the VM and NIC
+	ResourceGroup string `json:"resourceGroup"`
+
+	// Location is the Azure region (optional when region comes from CloudBroker recommendation; used as fallback)
+	// +optional
+	Location string `json:"location,omitempty"`
+
+	// SubnetID is the full resource ID of the subnet for the VM NIC (e.g. /subscriptions/.../resourceGroups/.../providers/Microsoft.Network/virtualNetworks/.../subnets/...)
+	SubnetID string `json:"subnetID"`
+
+	// ImageReference is optional; format "Publisher:Offer:Sku:Version" (e.g. Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest). Defaults to Ubuntu 22.04.
+	// +optional
+	ImageReference string `json:"imageReference,omitempty"`
+
+	// TenantIDSecretRef references a secret containing the Azure tenant ID (for Service Principal auth).
+	// +optional
+	TenantIDSecretRef *corev1.SecretKeySelector `json:"tenantIDSecretRef,omitempty"`
+
+	// ClientIDSecretRef references a secret containing the Azure client (application) ID.
+	// +optional
+	ClientIDSecretRef *corev1.SecretKeySelector `json:"clientIDSecretRef,omitempty"`
+
+	// ClientSecretSecretRef references a secret containing the Azure client secret.
+	// +optional
+	ClientSecretSecretRef *corev1.SecretKeySelector `json:"clientSecretSecretRef,omitempty"`
 }
 
 // JoinConfig defines how nodes join the Kubernetes cluster

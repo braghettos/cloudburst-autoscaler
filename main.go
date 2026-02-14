@@ -19,6 +19,7 @@ package main
 import (
 	"flag"
 	"os"
+	"strconv"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -64,7 +65,7 @@ func main() {
 			"Enabling this will ensure there is only one active controller manager.")
 	opts := zap.Options{
 		Development: true,
-		Level:       zapcore.DebugLevel, // show V(1) logs (e.g. reconcile phase, listed nodes) by default
+		Level:       zapLevelFromEnv(),
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -118,6 +119,7 @@ func main() {
 		Recorder:   mgr.GetEventRecorderFor("nodeclaim-controller"),
 		Clientset:  clientset,
 		RestConfig: mgr.GetConfig(),
+		Config:     controller.LoadConfig(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NodeClaim")
 		os.Exit(1)
@@ -144,5 +146,34 @@ func main() {
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
+	}
+}
+
+// zapLevelFromEnv returns zapcore.Level from LOG_LEVEL env (e.g. "debug", "info"). Defaults to DebugLevel.
+func zapLevelFromEnv() zapcore.Level {
+	s := os.Getenv("LOG_LEVEL")
+	if s == "" {
+		return zapcore.DebugLevel
+	}
+	switch s {
+	case "debug":
+		return zapcore.DebugLevel
+	case "info":
+		return zapcore.InfoLevel
+	case "warn", "warning":
+		return zapcore.WarnLevel
+	case "error":
+		return zapcore.ErrorLevel
+	case "dpanic":
+		return zapcore.DPanicLevel
+	case "panic":
+		return zapcore.PanicLevel
+	case "fatal":
+		return zapcore.FatalLevel
+	default:
+		if n, err := strconv.Atoi(s); err == nil && n >= 0 && n <= 6 {
+			return zapcore.Level(n)
+		}
+		return zapcore.DebugLevel
 	}
 }

@@ -40,22 +40,35 @@ const (
 
 // Provisioner handles GCP instance provisioning
 type Provisioner struct {
-	project string
-	zone    string
-	client  *compute.InstancesClient
+	project      string
+	zone         string
+	imageFamily  string
+	imageProject string
+	client       *compute.InstancesClient
 }
 
-// NewProvisioner creates a new GCP provisioner
-func NewProvisioner(ctx context.Context, project, zone string) (*Provisioner, error) {
+// NewProvisioner creates a new GCP provisioner.
+// imageFamily and imageProject are optional; when empty they default to
+// DefaultImageFamily ("ubuntu-2204-lts") and DefaultImageProject ("ubuntu-os-cloud").
+func NewProvisioner(ctx context.Context, project, zone, imageFamily, imageProject string) (*Provisioner, error) {
 	client, err := compute.NewInstancesRESTClient(ctx, option.WithScopes("https://www.googleapis.com/auth/cloud-platform"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create compute client: %w", err)
 	}
 
+	if imageFamily == "" {
+		imageFamily = DefaultImageFamily
+	}
+	if imageProject == "" {
+		imageProject = DefaultImageProject
+	}
+
 	return &Provisioner{
-		project: project,
-		zone:    zone,
-		client:  client,
+		project:      project,
+		zone:         zone,
+		imageFamily:  imageFamily,
+		imageProject: imageProject,
+		client:       client,
 	}, nil
 }
 
@@ -71,8 +84,9 @@ func GetZone(fallback string) string {
 	return fallback
 }
 
-// CreateInstance creates a GCP compute instance
-func (p *Provisioner) CreateInstance(ctx context.Context, name, machineType, zone, startupScript string) (string, error) {
+// CreateInstance creates a GCP compute instance.
+// The image parameter is unused for GCP; imageFamily and imageProject are set on the Provisioner.
+func (p *Provisioner) CreateInstance(ctx context.Context, name, machineType, zone, startupScript, image string) (string, error) {
 	var lastErr error
 
 	for attempt := 0; attempt <= MaxRetries; attempt++ {
@@ -104,8 +118,8 @@ func (p *Provisioner) CreateInstance(ctx context.Context, name, machineType, zon
 
 // createInstanceOnce makes a single attempt to create an instance
 func (p *Provisioner) createInstanceOnce(ctx context.Context, name, machineType, zone, startupScript string) (string, error) {
-	// Get image URL
-	imageURL, err := p.getImageURL(ctx, DefaultImageFamily, DefaultImageProject)
+	// Get image URL from provisioner config (set from NodeClass or defaults)
+	imageURL, err := p.getImageURL(ctx, p.imageFamily, p.imageProject)
 	if err != nil {
 		return "", fmt.Errorf("failed to get image URL: %w", err)
 	}

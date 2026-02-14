@@ -35,6 +35,7 @@ import (
 
 	cloudburstv1alpha1 "github.com/diegobraga/cloudburst-autoscaler/api/v1alpha1"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/cloudbroker"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/metrics"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/planner"
 )
 
@@ -162,20 +163,22 @@ func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			brokerReq.AllowedProviders = nodePool.Spec.Requirements.AllowedProviders
 		}
 
-		recommendation, err := r.CloudBroker.Recommend(ctx, &brokerReq)
+		recommendations, err := r.CloudBroker.Recommend(ctx, &brokerReq)
 		if err != nil {
 			logger.Error(err, "failed to get recommendation from CloudBroker")
 			r.recordEvent(nodePool, corev1.EventTypeWarning, "CloudBrokerError", fmt.Sprintf("Failed to get recommendation: %v", err))
 			return ctrl.Result{}, err
 		}
-		if recommendation == nil {
-			err := fmt.Errorf("CloudBroker returned nil recommendation")
-			logger.Error(err, "CloudBroker returned nil")
+		if len(recommendations) == 0 {
+			err := fmt.Errorf("CloudBroker returned no recommendations")
+			logger.Error(err, "CloudBroker returned empty list")
 			r.recordEvent(nodePool, corev1.EventTypeWarning, "CloudBrokerError", err.Error())
 			return ctrl.Result{}, err
 		}
-		if recommendation.Provider != "gcp" && recommendation.Provider != "scaleway" && recommendation.Provider != "hetzner" {
-			err := fmt.Errorf("recommendation provider is %q, only gcp, scaleway, and hetzner are supported", recommendation.Provider)
+		chosen := &recommendations[0]
+		alternatives := recommendations[1:]
+		if chosen.Provider != "gcp" && chosen.Provider != "scaleway" && chosen.Provider != "hetzner" && chosen.Provider != "digitalocean" && chosen.Provider != "ovh" && chosen.Provider != "aws" && chosen.Provider != "azure" {
+			err := fmt.Errorf("recommendation provider is %q, only gcp, scaleway, hetzner, digitalocean, ovh, aws, and azure are supported", chosen.Provider)
 			logger.Error(err, "unsupported provider")
 			r.recordEvent(nodePool, corev1.EventTypeWarning, "UnsupportedProvider", err.Error())
 			return ctrl.Result{}, err
@@ -198,30 +201,31 @@ func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		var nodeClass *cloudburstv1alpha1.NodeClass
 		for i := range nodeClassList.Items {
 			nc := &nodeClassList.Items[i]
-			if r.nodeClassSupportsProvider(nc, recommendation.Provider) {
+			if r.nodeClassSupportsProvider(nc, chosen.Provider) {
 				nodeClass = nc
 				logger.Info("matched NodeClass to provider",
 					"nodeClass", nc.Name,
-					"provider", recommendation.Provider,
+					"provider", chosen.Provider,
 				)
 				break
 			}
 		}
 
 		if nodeClass == nil {
-			err := fmt.Errorf("no NodeClass found that supports provider %q", recommendation.Provider)
+			err := fmt.Errorf("no NodeClass found that supports provider %q", chosen.Provider)
 			logger.Error(err, "no matching NodeClass")
 			r.recordEvent(nodePool, corev1.EventTypeWarning, "NoMatchingNodeClass", err.Error())
 			return ctrl.Result{}, err
 		}
 
-		// Create NodeClaims using the matched NodeClass
+		// Create NodeClaims using the matched NodeClass (chosen + alternatives for fallback on create failure)
 		for i := int32(0); i < nodesToCreate; i++ {
-			if err := r.createNodeClaim(ctx, nodePool, nodeClass, desiredCapacity, recommendation); err != nil {
+			if err := r.createNodeClaim(ctx, nodePool, nodeClass, desiredCapacity, chosen, alternatives); err != nil {
 				logger.Error(err, "unable to create NodeClaim", "index", i)
 				r.recordEvent(nodePool, corev1.EventTypeWarning, "NodeClaimCreationFailed", fmt.Sprintf("Failed to create NodeClaim: %v", err))
 				continue
 			}
+			metrics.ScaleEventsTotal.WithLabelValues("scale_up", chosen.Provider).Inc()
 		}
 
 		r.recordEvent(nodePool, corev1.EventTypeNormal, "NodeClaimsCreated", fmt.Sprintf("Created %d NodeClaim(s)", nodesToCreate))
@@ -416,6 +420,7 @@ func (r *NodePoolReconciler) initiateDeletion(ctx context.Context, nodeClaim *cl
 	}
 
 	// Update NodeClaim phase to Deleting
+	metrics.ScaleEventsTotal.WithLabelValues("scale_down", latestClaim.Spec.Chosen.Provider).Inc()
 	latestClaim.Status.Phase = cloudburstv1alpha1.NodeClaimPhaseDeleting
 	latestClaim.Status.Timestamps.LastTransition = metav1.Now()
 	if err := r.Status().Update(ctx, latestClaim); err != nil {
@@ -559,25 +564,43 @@ func ramGbFromDemand(memBytes int64, poolMin float64) float64 {
 }
 
 // createNodeClaim creates a new NodeClaim with recommendation from CloudBroker
-// nodeClassSupportsProvider checks if a NodeClass supports the given provider
+// nodeClassSupportsProvider checks if a NodeClass supports the given provider.
+// Region/zone comes from CloudBroker recommendation; only non-region required fields are checked here.
 func (r *NodePoolReconciler) nodeClassSupportsProvider(nodeClass *cloudburstv1alpha1.NodeClass, provider string) bool {
 	switch provider {
 	case "gcp":
-		// GCP is supported if Project and Zone are set
-		return nodeClass.Spec.GCP.Project != "" && nodeClass.Spec.GCP.Zone != ""
+		return nodeClass.Spec.GCP.Project != ""
 	case "scaleway":
-		// Scaleway is supported if Scaleway config exists and Zone is set
-		return nodeClass.Spec.Scaleway != nil && nodeClass.Spec.Scaleway.Zone != ""
+		return nodeClass.Spec.Scaleway != nil
 	case "hetzner":
-		// Hetzner is supported if Hetzner config exists and Location is set
-		return nodeClass.Spec.Hetzner != nil && nodeClass.Spec.Hetzner.Location != ""
+		return nodeClass.Spec.Hetzner != nil
+	case "digitalocean":
+		return nodeClass.Spec.DigitalOcean != nil
+	case "ovh":
+		return nodeClass.Spec.OVH != nil && nodeClass.Spec.OVH.ProjectID != ""
+	case "aws":
+		return nodeClass.Spec.AWS != nil && nodeClass.Spec.AWS.AMI != ""
+	case "azure":
+		return nodeClass.Spec.Azure != nil && nodeClass.Spec.Azure.SubscriptionID != "" && nodeClass.Spec.Azure.ResourceGroup != "" && nodeClass.Spec.Azure.SubnetID != ""
 	default:
 		return false
 	}
 }
 
-func (r *NodePoolReconciler) createNodeClaim(ctx context.Context, nodePool *cloudburstv1alpha1.NodePool, nodeClass *cloudburstv1alpha1.NodeClass, desiredCapacity planner.DesiredCapacity, recommendation *cloudbroker.RecommendationResult) error {
+func (r *NodePoolReconciler) createNodeClaim(ctx context.Context, nodePool *cloudburstv1alpha1.NodePool, nodeClass *cloudburstv1alpha1.NodeClass, desiredCapacity planner.DesiredCapacity, chosen *cloudbroker.RecommendationResult, alternatives []cloudbroker.RecommendationResult) error {
 	logger := log.FromContext(ctx)
+
+	altDetails := make([]cloudburstv1alpha1.InstanceDetails, 0, len(alternatives))
+	for _, a := range alternatives {
+		altDetails = append(altDetails, cloudburstv1alpha1.InstanceDetails{
+			Provider:        a.Provider,
+			Region:          a.Region,
+			InstanceType:    a.InstanceType,
+			VCPU:            a.VCPU,
+			RamGb:           a.RAMGb,
+			PriceEurPerHour: a.PriceEurPerHour,
+		})
+	}
 
 	// Create NodeClaim
 	// Naming standard: cb-<nodepool>-<k8s-suffix>
@@ -601,13 +624,14 @@ func (r *NodePoolReconciler) createNodeClaim(ctx context.Context, nodePool *clou
 			NodePoolRef:  nodePool.Name,
 			NodeClassRef: nodeClass.Name,
 			Chosen: cloudburstv1alpha1.InstanceDetails{
-				Provider:        recommendation.Provider,
-				Region:          recommendation.Region,
-				InstanceType:    recommendation.InstanceType,
-				VCPU:            recommendation.VCPU,
-				RamGb:           recommendation.RAMGb,
-				PriceEurPerHour: recommendation.PriceEurPerHour,
+				Provider:        chosen.Provider,
+				Region:          chosen.Region,
+				InstanceType:    chosen.InstanceType,
+				VCPU:            chosen.VCPU,
+				RamGb:           chosen.RAMGb,
+				PriceEurPerHour: chosen.PriceEurPerHour,
 			},
+			Alternatives: altDetails,
 		},
 		Status: cloudburstv1alpha1.NodeClaimStatus{
 			Phase: cloudburstv1alpha1.NodeClaimPhasePending,
@@ -637,9 +661,9 @@ func (r *NodePoolReconciler) createNodeClaim(ctx context.Context, nodePool *clou
 
 	logger.Info("created NodeClaim",
 		"nodeClaim", nodeClaim.Name,
-		"provider", recommendation.Provider,
-		"region", recommendation.Region,
-		"instanceType", recommendation.InstanceType,
+		"provider", chosen.Provider,
+		"region", chosen.Region,
+		"instanceType", chosen.InstanceType,
 	)
 
 	return nil

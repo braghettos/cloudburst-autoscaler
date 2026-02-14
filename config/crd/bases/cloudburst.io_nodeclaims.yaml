@@ -52,6 +52,40 @@ spec:
           spec:
             description: NodeClaimSpec defines the desired state of NodeClaim
             properties:
+              alternatives:
+                description: Alternatives holds fallback instance details if the chosen
+                  one fails (e.g. resource unavailable).
+                items:
+                  description: InstanceDetails contains the selected instance information
+                  properties:
+                    instanceType:
+                      description: InstanceType is the instance type
+                      type: string
+                    priceEurPerHour:
+                      description: PriceEurPerHour is the price per hour in EUR
+                      type: number
+                    provider:
+                      description: Provider is the cloud provider
+                      type: string
+                    ramGb:
+                      description: RamGb is the amount of RAM in GB
+                      type: number
+                    region:
+                      description: Region is the region where the instance is located
+                      type: string
+                    vcpu:
+                      description: VCPU is the number of vCPUs
+                      format: int32
+                      type: integer
+                  required:
+                  - instanceType
+                  - priceEurPerHour
+                  - provider
+                  - ramGb
+                  - region
+                  - vcpu
+                  type: object
+                type: array
               chosen:
                 description: Chosen contains the selected instance details
                 properties:

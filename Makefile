@@ -132,6 +132,14 @@ undeploy: ## Undeploy controller from the K8s cluster.
 create-namespace: ## Create the cloudburst-system namespace.
 	$(KUBECTL) create namespace $(NAMESPACE) --dry-run=client -o yaml | $(KUBECTL) apply -f -
 
+.PHONY: env-align
+env-align: ## Add any keys from .env.example that are missing in .env (keeps existing values).
+	bash hack/align-env.sh
+
+.PHONY: clean
+clean: ## Remove local build artifacts and E2E log directory.
+	rm -rf bin/ e2e-logs/
+
 .PHONY: create-secrets
 create-secrets: create-namespace ## Create required secrets (GCP credentials and Tailscale auth key). Reads from .env file or command line.
 	@if [ -z "$(GCP_CREDENTIALS_FILE)" ] || [ ! -f "$(GCP_CREDENTIALS_FILE)" ]; then \

@@ -32,5 +32,8 @@ secrets/
 # Generated Kind config
 hack/kind-config.yaml
 
+# E2E test logs
+e2e-logs/
+
 # macOS
 .DS_Store

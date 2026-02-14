@@ -26,6 +26,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/diegobraga/cloudburst-autoscaler/internal/metrics"
 )
 
 const (
@@ -103,8 +105,9 @@ func NewClient() *Client {
 	}
 }
 
-// Recommend requests instance recommendations and returns the top recommendation
-func (c *Client) Recommend(ctx context.Context, req *RecommendationRequest) (*RecommendationResult, error) {
+// Recommend requests instance recommendations and returns a list of recommendations (up to req.Limit).
+// The first is the preferred choice; the rest can be used as fallbacks if instance creation fails.
+func (c *Client) Recommend(ctx context.Context, req *RecommendationRequest) ([]RecommendationResult, error) {
 	var lastErr error
 
 	for attempt := 0; attempt <= MaxRetries; attempt++ {
@@ -118,9 +121,11 @@ func (c *Client) Recommend(ctx context.Context, req *RecommendationRequest) (*Re
 			}
 		}
 
-		result, err := c.recommendOnce(ctx, req)
+		start := time.Now()
+		results, err := c.recommendOnce(ctx, req)
+		metrics.CloudBrokerRequestDurationSeconds.Observe(time.Since(start).Seconds())
 		if err == nil {
-			return result, nil
+			return results, nil
 		}
 
 		lastErr = err
@@ -129,8 +134,8 @@ func (c *Client) Recommend(ctx context.Context, req *RecommendationRequest) (*Re
 	return nil, fmt.Errorf("failed after %d attempts: %w", MaxRetries+1, lastErr)
 }
 
-// recommendOnce makes a single recommendation request
-func (c *Client) recommendOnce(ctx context.Context, req *RecommendationRequest) (*RecommendationResult, error) {
+// recommendOnce makes a single recommendation request and returns up to req.Limit recommendations.
+func (c *Client) recommendOnce(ctx context.Context, req *RecommendationRequest) ([]RecommendationResult, error) {
 	url := fmt.Sprintf("%s/api/recommendations", c.baseURL)
 
 	// Marshal request body
@@ -174,18 +179,29 @@ func (c *Client) recommendOnce(ctx context.Context, req *RecommendationRequest) 
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	// Select top recommendation
 	if len(apiResp.Recommendations) == 0 {
 		return nil, fmt.Errorf("no recommendations returned")
 	}
 
-	top := apiResp.Recommendations[0]
-	return &RecommendationResult{
-		Provider:        top.Provider,
-		Region:          top.Region,
-		InstanceType:    top.InstanceType,
-		VCPU:            top.VCPU,
-		RAMGb:           top.RAMGb,
-		PriceEurPerHour: top.PriceEurPerHour,
-	}, nil
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 1
+	}
+	n := int(limit)
+	if n > len(apiResp.Recommendations) {
+		n = len(apiResp.Recommendations)
+	}
+	results := make([]RecommendationResult, 0, n)
+	for i := 0; i < n; i++ {
+		r := apiResp.Recommendations[i]
+		results = append(results, RecommendationResult{
+			Provider:        r.Provider,
+			Region:          r.Region,
+			InstanceType:    r.InstanceType,
+			VCPU:            r.VCPU,
+			RAMGb:           r.RAMGb,
+			PriceEurPerHour: r.PriceEurPerHour,
+		})
+	}
+	return results, nil
 }

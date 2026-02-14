@@ -39,12 +39,209 @@ spec:
           spec:
             description: NodeClassSpec defines the desired state of NodeClass
             properties:
+              aws:
+                description: AWS configuration (used when NodeClaim Chosen.Provider
+                  is aws)
+                properties:
+                  accessKeyIDSecretRef:
+                    description: AccessKeyIDSecretRef references a secret containing
+                      the AWS access key ID.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  ami:
+                    description: AMI is the Amazon Machine Image ID (required for
+                      EC2)
+                    type: string
+                  instanceProfileARN:
+                    description: InstanceProfileARN is the IAM instance profile ARN
+                      (optional)
+                    type: string
+                  region:
+                    description: Region is the AWS region (optional when region comes
+                      from CloudBroker recommendation; used as fallback)
+                    type: string
+                  secretAccessKeySecretRef:
+                    description: SecretAccessKeySecretRef references a secret containing
+                      the AWS secret access key.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  securityGroupIDs:
+                    description: SecurityGroupIDs are the security group IDs to attach
+                      to the instance (optional)
+                    items:
+                      type: string
+                    type: array
+                  subnetID:
+                    description: SubnetID is the VPC subnet ID for the instance (optional;
+                      uses default if empty)
+                    type: string
+                required:
+                - ami
+                type: object
+              azure:
+                description: Azure configuration (used when NodeClaim Chosen.Provider
+                  is azure)
+                properties:
+                  clientIDSecretRef:
+                    description: ClientIDSecretRef references a secret containing
+                      the Azure client (application) ID.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  clientSecretSecretRef:
+                    description: ClientSecretSecretRef references a secret containing
+                      the Azure client secret.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  imageReference:
+                    description: ImageReference is optional; format "Publisher:Offer:Sku:Version"
+                      (e.g. Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest).
+                      Defaults to Ubuntu 22.04.
+                    type: string
+                  location:
+                    description: Location is the Azure region (optional when region
+                      comes from CloudBroker recommendation; used as fallback)
+                    type: string
+                  resourceGroup:
+                    description: ResourceGroup is the resource group for the VM and
+                      NIC
+                    type: string
+                  subnetID:
+                    description: SubnetID is the full resource ID of the subnet for
+                      the VM NIC (e.g. /subscriptions/.../resourceGroups/.../providers/Microsoft.Network/virtualNetworks/.../subnets/...)
+                    type: string
+                  subscriptionID:
+                    description: SubscriptionID is the Azure subscription ID
+                    type: string
+                  tenantIDSecretRef:
+                    description: TenantIDSecretRef references a secret containing
+                      the Azure tenant ID (for Service Principal auth).
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                required:
+                - resourceGroup
+                - subnetID
+                - subscriptionID
+                type: object
               bootstrap:
                 description: Bootstrap configuration
                 properties:
                   kubernetesVersion:
                     description: KubernetesVersion is the Kubernetes version to use
                       (optional)
+                    type: string
+                type: object
+              digitalocean:
+                description: DigitalOcean configuration (used when NodeClaim Chosen.Provider
+                  is digitalocean)
+                properties:
+                  apiTokenSecretRef:
+                    description: |-
+                      APITokenSecretRef references a secret containing the DigitalOcean API token.
+                      Secret must have the key specified (default "DIGITALOCEAN_API_TOKEN").
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  image:
+                    description: 'Image is the DigitalOcean image slug (default: "ubuntu-22-04-x64")'
+                    type: string
+                  region:
+                    description: Region is the DigitalOcean region slug (optional
+                      when region comes from CloudBroker recommendation; used as fallback)
                     type: string
                 type: object
               gcp:
@@ -60,15 +257,22 @@ spec:
                     default: ubuntu-os-cloud
                     description: 'ImageProject is the image project (default: ubuntu-os-cloud)'
                     type: string
+                  preferredZoneSuffix:
+                    default: -b
+                    description: PreferredZoneSuffix is the zone suffix to append
+                      to a region when CloudBroker returns a region (e.g. "europe-west1")
+                      and GCP requires a zone (e.g. "europe-west1-b"). Defaults to
+                      "-b".
+                    type: string
                   project:
                     description: Project is the GCP project ID
                     type: string
                   zone:
-                    description: Zone is the GCP zone
+                    description: Zone is the GCP zone (optional when region comes
+                      from CloudBroker recommendation; used as fallback)
                     type: string
                 required:
                 - project
-                - zone
                 type: object
               hetzner:
                 description: Hetzner Cloud configuration (used when NodeClaim Chosen.Provider
@@ -102,10 +306,9 @@ spec:
                     type: string
                   location:
                     description: Location is the Hetzner Cloud datacenter location
-                      (e.g. "fsn1", "nbg1", "hel1")
+                      (optional when region comes from CloudBroker recommendation;
+                      used as fallback)
                     type: string
-                required:
-                - location
                 type: object
               join:
                 description: Join configuration for joining the Kubernetes cluster
@@ -132,6 +335,91 @@ spec:
                     type: integer
                 required:
                 - hostApiServer
+                type: object
+              ovh:
+                description: OVH Cloud configuration (used when NodeClaim Chosen.Provider
+                  is ovh)
+                properties:
+                  applicationKeySecretRef:
+                    description: ApplicationKeySecretRef references a secret containing
+                      the OVH application key.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  applicationSecretSecretRef:
+                    description: ApplicationSecretSecretRef references a secret containing
+                      the OVH application secret.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  consumerKeySecretRef:
+                    description: ConsumerKeySecretRef references a secret containing
+                      the OVH consumer key.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  endpoint:
+                    description: Endpoint is the OVH API endpoint (e.g. "ovh-eu",
+                      "ovh-ca"). Defaults to "ovh-eu".
+                    type: string
+                  imageID:
+                    description: 'ImageID is the OVH image identifier (default: "Ubuntu
+                      22.04")'
+                    type: string
+                  projectID:
+                    description: ProjectID is the OVH Cloud project ID (serviceName)
+                    type: string
+                  region:
+                    description: Region is the OVH Cloud region (optional when region
+                      comes from CloudBroker recommendation; used as fallback)
+                    type: string
+                required:
+                - projectID
                 type: object
               scaleway:
                 description: Scaleway configuration (used when NodeClaim Chosen.Provider
@@ -176,10 +464,9 @@ spec:
                       use default from credentials)
                     type: string
                   zone:
-                    description: Zone is the Scaleway zone (e.g. fr-par-1, nl-ams-1)
+                    description: Zone is the Scaleway zone (optional when region comes
+                      from CloudBroker recommendation; used as fallback)
                     type: string
-                required:
-                - zone
                 type: object
               tailscale:
                 description: Tailscale configuration for VPN connectivity

@@ -30,6 +30,10 @@ type NodeClaimSpec struct {
 
 	// Chosen contains the selected instance details
 	Chosen InstanceDetails `json:"chosen"`
+
+	// Alternatives holds fallback instance details if the chosen one fails (e.g. resource unavailable).
+	// +optional
+	Alternatives []InstanceDetails `json:"alternatives,omitempty"`
 }
 
 // InstanceDetails contains the selected instance information
