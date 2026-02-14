@@ -222,7 +222,7 @@ func (p *Provisioner) IsInstanceRunning(ctx context.Context, instanceID string) 
 	if err != nil {
 		return false, err
 	}
-	return strings.ToUpper(status) == "ACTIVE", nil
+	return strings.EqualFold(status, "ACTIVE"), nil
 }
 
 // Close releases resources. OVH client has no explicit close; no-op.

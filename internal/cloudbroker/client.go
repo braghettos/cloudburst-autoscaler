@@ -194,14 +194,7 @@ func (c *Client) recommendOnce(ctx context.Context, req *RecommendationRequest) 
 	results := make([]RecommendationResult, 0, n)
 	for i := 0; i < n; i++ {
 		r := apiResp.Recommendations[i]
-		results = append(results, RecommendationResult{
-			Provider:        r.Provider,
-			Region:          r.Region,
-			InstanceType:    r.InstanceType,
-			VCPU:            r.VCPU,
-			RAMGb:           r.RAMGb,
-			PriceEurPerHour: r.PriceEurPerHour,
-		})
+		results = append(results, RecommendationResult(r))
 	}
 	return results, nil
 }

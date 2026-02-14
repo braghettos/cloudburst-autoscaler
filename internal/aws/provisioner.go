@@ -162,7 +162,7 @@ func (p *Provisioner) createInstanceOnce(ctx context.Context, name, instanceType
 			return "", fmt.Errorf("failed to run instances: %w", err)
 		}
 	}
-	if out.Instances == nil || len(out.Instances) == 0 {
+	if len(out.Instances) == 0 {
 		return "", fmt.Errorf("RunInstances returned no instances")
 	}
 	instanceID := aws.ToString(out.Instances[0].InstanceId)
@@ -198,7 +198,7 @@ func (p *Provisioner) IsInstanceRunning(ctx context.Context, instanceID string) 
 	if err != nil {
 		return false, fmt.Errorf("failed to describe instance: %w", err)
 	}
-	if out.Reservations == nil || len(out.Reservations) == 0 || len(out.Reservations[0].Instances) == 0 {
+	if len(out.Reservations) == 0 || len(out.Reservations[0].Instances) == 0 {
 		return false, fmt.Errorf("instance %s not found", id)
 	}
 	state := out.Reservations[0].Instances[0].State.Name
@@ -262,7 +262,7 @@ func (p *Provisioner) resolveUbuntu2204AMI(ctx context.Context) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	if desc.Images == nil || len(desc.Images) == 0 {
+	if len(desc.Images) == 0 {
 		return "", fmt.Errorf("no Ubuntu 22.04 AMI found in %s", p.region)
 	}
 	// Sort by creation date and pick latest (simplified: first by name/date if available).
