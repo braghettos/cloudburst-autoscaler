@@ -72,6 +72,16 @@ graph TB
 2. If a node is empty (no non-DaemonSet pods) and `ttlSecondsAfterEmpty` has elapsed, deletion is triggered.
 3. `NodeClaim` controller cordons the node, drains it, deletes the Kubernetes node object, and deletes the cloud VM.
 
+## Cloudburst vs alternatives
+
+| Aspect | Cloudburst | Karpenter | Cluster Autoscaler |
+|--------|------------|-----------|--------------------|
+| **Provider scope** | Multi-cloud (GCP, AWS, Azure, Hetzner, Scaleway, DigitalOcean, OVH) | Primarily AWS (EKS) | Per-provider (node groups) |
+| **Cost selection** | Cheapest instance across providers (via [CloudBroker](https://github.com/braghettos/cloudbroker)) | Spot/preemptible within same cloud | Resize existing node groups |
+| **Cross-cloud burst** | Yes — e.g. EKS control plane, Hetzner burst nodes (Tailscale) | No — nodes in same cloud as cluster | No — scales node groups in-place |
+
+Cloudburst is built for multi-cloud cost optimisation and cross-cloud burst. If you run a single cloud (e.g. EKS only), Karpenter or Cluster Autoscaler may fit better.
+
 ## Features
 
 - **Multi-provider** &mdash; GCP Compute Engine, Scaleway, Hetzner Cloud, DigitalOcean, OVH Cloud, AWS EC2, Azure VM
