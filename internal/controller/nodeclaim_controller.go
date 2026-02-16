@@ -64,6 +64,7 @@ type NodeClaimReconciler struct {
 //+kubebuilder:rbac:groups=cloudburst.io,resources=nodeclaims/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=cloudburst.io,resources=nodeclaims/finalizers,verbs=update
 //+kubebuilder:rbac:groups=cloudburst.io,resources=nodeclasses,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=configmaps,verbs=get
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create
 //+kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;patch;delete
 //+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
