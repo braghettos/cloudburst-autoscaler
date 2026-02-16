@@ -112,6 +112,29 @@ spec:
                     - EU
                     - ANY
                     type: string
+                  tcoPlacement:
+                    description: |-
+                      TCOPlacement defines placement affinity for TCO-aware recommendations.
+                      When set, CloudBroker factors in egress costs when ranking instances.
+                    properties:
+                      dataSourceProvider:
+                        description: DataSourceProvider is the provider where data/dependencies
+                          live (e.g. "gcp").
+                        type: string
+                      dataSourceRegion:
+                        description: DataSourceRegion is the region where data/dependencies
+                          live (e.g. "us-central1").
+                        type: string
+                      estimatedEgressGbPerHour:
+                        description: EstimatedEgressGbPerHour is the expected egress
+                          from the new instance in GB/hour.
+                        type: number
+                      maxTCOEurPerHour:
+                        description: |-
+                          MaxTCOEurPerHour is the maximum total cost of ownership (instance + egress) in EUR/hour.
+                          When set with TCO placement, CloudBroker filters by tco <= max instead of only instance price.
+                        type: number
+                    type: object
                 required:
                 - arch
                 - maxPriceEurPerHour

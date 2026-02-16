@@ -54,16 +54,30 @@ type RecommendationRequest struct {
 	MaxPriceEurPerHour float64  `json:"max_price_eur_per_hour"`
 	Limit              int32    `json:"limit"`
 	AllowedProviders   []string `json:"allowed_providers,omitempty"`
+
+	// TCO placement context (optional): when set, CloudBroker factors in egress costs when ranking
+	DataSourceProvider       string  `json:"data_source_provider,omitempty"`
+	DataSourceRegion         string  `json:"data_source_region,omitempty"`
+	EstimatedEgressGbPerHour float64 `json:"estimated_egress_gb_per_hour,omitempty"`
+	MaxTCOEurPerHour         float64 `json:"max_tco_eur_per_hour,omitempty"`
+}
+
+// RecommendationExplain is the nested explain object from CloudBroker (contains price and TCO breakdown)
+type RecommendationExplain struct {
+	PriceEurPerHour        float64 `json:"price_eur_per_hour"`
+	TCOEurPerHour         float64 `json:"tco_eur_per_hour,omitempty"`
+	EgressCostEurPerHour float64 `json:"egress_cost_eur_per_hour,omitempty"`
 }
 
 // Recommendation represents a single instance recommendation (field names match CloudBroker API response)
 type Recommendation struct {
-	Provider        string  `json:"provider_slug"`
-	Region          string  `json:"region_slug"`
-	InstanceType    string  `json:"instance_type_name"`
-	VCPU            int32   `json:"vcpu"`
-	RAMGb           float64 `json:"ram_gb"`
-	PriceEurPerHour float64 `json:"price_eur_per_hour"`
+	Provider        string                 `json:"provider_slug"`
+	Region          string                 `json:"region_slug"`
+	InstanceType    string                 `json:"instance_type_name"`
+	VCPU            int32                  `json:"vcpu"`
+	RAMGb           float64                `json:"ram_gb"`
+	PriceEurPerHour float64                `json:"price_eur_per_hour"`
+	Explain         *RecommendationExplain `json:"explain,omitempty"`
 }
 
 // RecommendationsResponse represents the API response
@@ -194,7 +208,18 @@ func (c *Client) recommendOnce(ctx context.Context, req *RecommendationRequest) 
 	results := make([]RecommendationResult, 0, n)
 	for i := 0; i < n; i++ {
 		r := apiResp.Recommendations[i]
-		results = append(results, RecommendationResult(r))
+		price := r.PriceEurPerHour
+		if r.Explain != nil {
+			price = r.Explain.PriceEurPerHour
+		}
+		results = append(results, RecommendationResult{
+			Provider:        r.Provider,
+			Region:          r.Region,
+			InstanceType:    r.InstanceType,
+			VCPU:            r.VCPU,
+			RAMGb:           r.RAMGb,
+			PriceEurPerHour: price,
+		})
 	}
 	return results, nil
 }

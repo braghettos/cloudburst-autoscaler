@@ -71,6 +71,33 @@ type NodePoolRequirements struct {
 	// +optional
 	// +kubebuilder:validation:Type=number
 	MinRAMGb *float64 `json:"minRAMGb,omitempty"`
+
+	// TCOPlacement defines placement affinity for TCO-aware recommendations.
+	// When set, CloudBroker factors in egress costs when ranking instances.
+	// +optional
+	TCOPlacement *TCOPlacement `json:"tcoPlacement,omitempty"`
+}
+
+// TCOPlacement defines placement affinity for TCO-aware recommendations.
+// When data source and estimated egress are provided, cheaper instances in other
+// clouds may be deprioritized if cross-cloud transfer costs outweigh savings.
+type TCOPlacement struct {
+	// DataSourceProvider is the provider where data/dependencies live (e.g. "gcp").
+	// +optional
+	DataSourceProvider string `json:"dataSourceProvider,omitempty"`
+
+	// DataSourceRegion is the region where data/dependencies live (e.g. "us-central1").
+	// +optional
+	DataSourceRegion string `json:"dataSourceRegion,omitempty"`
+
+	// EstimatedEgressGbPerHour is the expected egress from the new instance in GB/hour.
+	// +optional
+	EstimatedEgressGbPerHour float64 `json:"estimatedEgressGbPerHour,omitempty"`
+
+	// MaxTCOEurPerHour is the maximum total cost of ownership (instance + egress) in EUR/hour.
+	// When set with TCO placement, CloudBroker filters by tco <= max instead of only instance price.
+	// +optional
+	MaxTCOEurPerHour float64 `json:"maxTCOEurPerHour,omitempty"`
 }
 
 // NodePoolLimits defines maximum constraints

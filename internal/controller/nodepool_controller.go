@@ -162,6 +162,14 @@ func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if len(nodePool.Spec.Requirements.AllowedProviders) > 0 {
 			brokerReq.AllowedProviders = nodePool.Spec.Requirements.AllowedProviders
 		}
+		if nodePool.Spec.Requirements.TCOPlacement != nil {
+			brokerReq.DataSourceProvider = nodePool.Spec.Requirements.TCOPlacement.DataSourceProvider
+			brokerReq.DataSourceRegion = nodePool.Spec.Requirements.TCOPlacement.DataSourceRegion
+			brokerReq.EstimatedEgressGbPerHour = nodePool.Spec.Requirements.TCOPlacement.EstimatedEgressGbPerHour
+			if nodePool.Spec.Requirements.TCOPlacement.MaxTCOEurPerHour > 0 {
+				brokerReq.MaxTCOEurPerHour = nodePool.Spec.Requirements.TCOPlacement.MaxTCOEurPerHour
+			}
+		}
 
 		recommendations, err := r.CloudBroker.Recommend(ctx, &brokerReq)
 		if err != nil {
