@@ -64,8 +64,8 @@ type RecommendationRequest struct {
 
 // RecommendationExplain is the nested explain object from CloudBroker (contains price and TCO breakdown)
 type RecommendationExplain struct {
-	PriceEurPerHour        float64 `json:"price_eur_per_hour"`
-	TCOEurPerHour         float64 `json:"tco_eur_per_hour,omitempty"`
+	PriceEurPerHour      float64 `json:"price_eur_per_hour"`
+	TCOEurPerHour        float64 `json:"tco_eur_per_hour,omitempty"`
 	EgressCostEurPerHour float64 `json:"egress_cost_eur_per_hour,omitempty"`
 }
 
