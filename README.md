@@ -197,6 +197,17 @@ export CLOUDBROKER_BASEURL=http://localhost:8000
 make run
 ```
 
+### CloudBurst UI
+
+The dashboard lives in [cloudburst-autoscaler-ui](../cloudburst-autoscaler-ui). It connects to your cluster via **kubeconfig**—no port-forward required. From this repo:
+
+```bash
+make run-ui
+# Open http://localhost:8082
+```
+
+Or from the UI repo: `cd ../cloudburst-autoscaler-ui && make run`. For in-cluster deployment, use `make deploy-ui`.
+
 ### Integration Tests
 
 ```bash

@@ -55,6 +55,30 @@ lint: ## Run golangci-lint.
 build: generate fmt vet ## Build manager binary.
 	CGO_ENABLED=0 go build -o bin/manager main.go
 
+##@ UI (cloudburst-autoscaler-ui repo)
+
+UI_REPO ?= ../cloudburst-autoscaler-ui
+
+.PHONY: build-ui
+build-ui: ## Build CloudBurst UI (delegates to cloudburst-autoscaler-ui repo).
+	@$(MAKE) -C $(UI_REPO) build-ui-binary CLOUDBURST_PATH=$(CURDIR)
+	@mkdir -p bin && cp $(UI_REPO)/bin/cloudburst-ui bin/
+
+.PHONY: run-ui
+run-ui: ## Run CloudBurst UI locally. Uses kubeconfig. Open http://localhost:8082
+	@$(MAKE) -C $(UI_REPO) run CLOUDBURST_PATH=$(CURDIR)
+
+.PHONY: docker-build-ui
+docker-build-ui: ## Build Docker image for CloudBurst UI.
+	@$(MAKE) -C $(UI_REPO) docker-build CLOUDBURST_PATH=$(CURDIR)
+
+.PHONY: deploy-ui
+deploy-ui: docker-build-ui ## Deploy CloudBurst UI into cluster.
+	@if command -v kind >/dev/null 2>&1 && kind get clusters 2>/dev/null | grep -q "^$(KIND_CLUSTER_NAME)$$"; then \
+		kind load docker-image cloudburst-autoscaler-ui:latest --name $(KIND_CLUSTER_NAME); \
+	fi
+	@$(MAKE) -C $(UI_REPO) deploy
+
 .PHONY: run
 run: manifests generate fmt vet ## Run controller from your host.
 	go run ./main.go
