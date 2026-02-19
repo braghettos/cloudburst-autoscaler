@@ -82,6 +82,16 @@ graph TB
 
 Cloudburst is built for multi-cloud cost optimisation and cross-cloud burst. If you run a single cloud (e.g. EKS only), Karpenter or Cluster Autoscaler may fit better.
 
+## Use cases
+
+| Use case | Description |
+|----------|-------------|
+| **Cost-optimised batch & CI** | Run batch jobs, CI pipelines, or ML training that don't fit your base cluster. Cloudburst adds the cheapest node across clouds when needed, removes it when done. |
+| **Cross-cloud hybrid** | Keep the control plane in one cloud (e.g. EKS) and burst workers to cheaper providers (Hetzner, Scaleway) via Tailscale. Best of both worlds. |
+| **EU compliance with cost flexibility** | Run sensitive workloads in EU regions (Hetzner, Scaleway, OVH, GCP eu-west) while benefiting from cross-provider price comparison. |
+| **Dev/staging scale-to-zero** | Small base cluster; burst nodes only when devs run integration tests or staging deploys. Scale down to zero when idle. |
+| **Event-driven spikes** | Handle one-off spikes (product launches, campaigns, data migrations) without over-provisioning year-round. |
+
 ## Features
 
 - **Multi-provider** &mdash; GCP Compute Engine, Scaleway, Hetzner Cloud, DigitalOcean, OVH Cloud, AWS EC2, Azure VM

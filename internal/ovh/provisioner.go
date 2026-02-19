@@ -18,6 +18,7 @@ package ovh
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -199,6 +200,66 @@ func (p *Provisioner) deleteInstanceOnce(ctx context.Context, instanceID string)
 	}
 
 	return nil
+}
+
+// ListInstances returns all instances in the project (across regions).
+func (p *Provisioner) ListInstances(ctx context.Context) ([]ovhInstanceInfo, error) {
+	path := fmt.Sprintf("/cloud/project/%s/instance", p.projectID)
+	var raw json.RawMessage
+	if err := p.client.GetWithContext(ctx, path, &raw); err != nil {
+		return nil, fmt.Errorf("failed to list instances: %w", err)
+	}
+	// OVH API returns map[region][]instanceId: {"GRA7": ["id1","id2"], "DE1": ["id3"]}
+	var regionMap map[string][]string
+	if err := json.Unmarshal(raw, &regionMap); err == nil {
+		var result []ovhInstanceInfo
+		for _, regionIDs := range regionMap {
+			for _, id := range regionIDs {
+				info, err := p.getInstanceInfo(ctx, id)
+				if err != nil {
+					continue
+				}
+				result = append(result, *info)
+			}
+		}
+		return result, nil
+	}
+	// Fallback: []string or []object
+	var ids []string
+	if err := json.Unmarshal(raw, &ids); err == nil {
+		var result []ovhInstanceInfo
+		for _, id := range ids {
+			info, err := p.getInstanceInfo(ctx, id)
+			if err != nil {
+				continue
+			}
+			result = append(result, *info)
+		}
+		return result, nil
+	}
+	var objs []ovhInstanceInfo
+	if err := json.Unmarshal(raw, &objs); err == nil {
+		return objs, nil
+	}
+	return nil, fmt.Errorf("unexpected OVH instances API response format")
+}
+
+// ovhInstanceInfo holds instance list item fields.
+type ovhInstanceInfo struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Region string `json:"region"`
+}
+
+func (p *Provisioner) getInstanceInfo(ctx context.Context, instanceID string) (*ovhInstanceInfo, error) {
+	path := fmt.Sprintf("/cloud/project/%s/instance/%s", p.projectID, instanceID)
+	var result ovhInstanceInfo
+	if err := p.client.GetWithContext(ctx, path, &result); err != nil {
+		return nil, err
+	}
+	result.ID = instanceID
+	return &result, nil
 }
 
 // GetInstanceStatus returns the instance status (ACTIVE, PENDING, etc.).

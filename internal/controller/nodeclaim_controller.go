@@ -203,8 +203,10 @@ func (r *NodeClaimReconciler) handlePending(ctx context.Context, nodeClaim *clou
 		}
 	}
 
+	// For GCP, use instance name (cb-gcp-...) as node hostname so the K8s node is identifiable.
+	nodeNameForBootstrap := instanceNameForProvider(provider, nodeClaim.Name)
 	startupScript := bootstrap.GenerateStartupScript(&bootstrap.StartupScriptConfig{
-		NodeName:                  nodeClaim.Name,
+		NodeName:                  nodeNameForBootstrap,
 		TailscaleAuthKey:          tailscaleAuthKey,
 		KubernetesVersion:         nodeClass.Spec.Bootstrap.KubernetesVersion,
 		JoinCommand:               joinCommand,
@@ -240,9 +242,19 @@ func (r *NodeClaimReconciler) handlePending(ctx context.Context, nodeClaim *clou
 		return ctrl.Result{}, err
 	}
 	defer prov.Close()
-	instanceName := nodeClaim.Name
+	instanceName := instanceNameForProvider(provider, nodeClaim.Name)
 	instanceType := nodeClaim.Spec.Chosen.InstanceType
-	logger.Info("creating instance", "provider", provider, "instanceName", instanceName, "instanceType", instanceType)
+	chosen := nodeClaim.Spec.Chosen
+	logger.Info("provisioning with CloudBroker recommendation",
+		"provider", provider,
+		"region", chosen.Region,
+		"instanceType", instanceType,
+		"vcpu", chosen.VCPU,
+		"ramGb", chosen.RamGb,
+		"priceEurPerHour", chosen.PriceEurPerHour,
+		"instanceName", instanceName,
+		"alternativesCount", len(nodeClaim.Spec.Alternatives),
+	)
 	r.recordEvent(nodeClaim, corev1.EventTypeNormal, "InstanceCreationStarted", fmt.Sprintf("Creating %s instance %s", provider, instanceName))
 	instanceID, err := prov.CreateInstance(ctx, instanceName, instanceType, regionOrZone, startupScript, image)
 	if err != nil {
@@ -275,8 +287,16 @@ func (r *NodeClaimReconciler) handlePending(ctx context.Context, nodeClaim *clou
 		return ctrl.Result{}, err
 	}
 
-	// Update NodeClaim status
+	// Update NodeClaim status with instance ID and the recommendation used for provisioning
 	nodeClaim.Status.InstanceID = instanceID
+	nodeClaim.Status.RecommendationUsed = &cloudburstv1alpha1.InstanceDetails{
+		Provider:        nodeClaim.Spec.Chosen.Provider,
+		Region:          nodeClaim.Spec.Chosen.Region,
+		InstanceType:    nodeClaim.Spec.Chosen.InstanceType,
+		VCPU:            nodeClaim.Spec.Chosen.VCPU,
+		RamGb:           nodeClaim.Spec.Chosen.RamGb,
+		PriceEurPerHour: nodeClaim.Spec.Chosen.PriceEurPerHour,
+	}
 	fromPhase := nodeClaim.Status.Phase
 	nodeClaim.Status.Phase = cloudburstv1alpha1.NodeClaimPhaseProvisioning
 	metrics.NodeClaimPhaseTransitionsTotal.WithLabelValues(provider, string(fromPhase), string(cloudburstv1alpha1.NodeClaimPhaseProvisioning)).Inc()
@@ -488,9 +508,9 @@ func (r *NodeClaimReconciler) handleJoining(ctx context.Context, nodeClaim *clou
 		return ctrl.Result{}, nil
 	}
 
-	// The node name should match the NodeClaim name (set as hostname in bootstrap script)
-	// The bootstrap script sets --hostname=$NODE_NAME where NODE_NAME=nodeClaim.Name
-	expectedNodeName := nodeClaim.Name
+	// The node name matches instanceNameForProvider (set as hostname in bootstrap script).
+	// For GCP this is cb-gcp-<nodepool>-<suffix>; for others it's nodeClaim.Name.
+	expectedNodeName := instanceNameForProvider(nodeClaim.Spec.Chosen.Provider, nodeClaim.Name)
 
 	// List nodes and find matching node
 	nodeList := &corev1.NodeList{}
@@ -760,6 +780,14 @@ func (r *NodeClaimReconciler) handleDeletion(ctx context.Context, nodeClaim *clo
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// instanceNameForProvider returns the cloud instance name. For GCP, injects "gcp" after "cb-"
+// so VMs are identifiable in the GCP console (e.g. cb-gcp-e2e-nodepool-xxx).
+// instanceNameForProvider returns the cloud instance name. For all providers, including GCP,
+// we use the NodeClaim name as-is so the pattern cb-e2e-<provider>-nodepool is consistent.
+func instanceNameForProvider(provider, nodeClaimName string) string {
+	return nodeClaimName
 }
 
 // instanceNameFromID returns the instance name from a GCP instance ID (projects/.../zones/.../instances/name).

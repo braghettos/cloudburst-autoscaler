@@ -83,6 +83,34 @@ const (
 	NodeClaimPhaseDeleting NodeClaimPhase = "Deleting"
 )
 
+// RecommendationRequestSummary stores the CloudBroker request that led to this NodeClaim.
+type RecommendationRequestSummary struct {
+	// MinVCPU is the minimum vCPU requested
+	MinVCPU int32 `json:"minVcpu"`
+	// MinRAMGb is the minimum RAM in GB requested
+	MinRAMGb float64 `json:"minRamGb"`
+	// RegionConstraint is the region constraint passed to CloudBroker
+	// +optional
+	RegionConstraint string `json:"regionConstraint,omitempty"`
+	// MaxPriceEurPerHour is the maximum price per hour in EUR
+	MaxPriceEurPerHour float64 `json:"maxPriceEurPerHour"`
+	// Arch is the architecture requirement (e.g. amd64, arm64)
+	// +optional
+	Arch string `json:"arch,omitempty"`
+	// AllowedProviders restricts to these providers
+	// +optional
+	AllowedProviders []string `json:"allowedProviders,omitempty"`
+	// DataSourceProvider and DataSourceRegion are set when TCO placement is used
+	// +optional
+	DataSourceProvider string `json:"dataSourceProvider,omitempty"`
+	// +optional
+	DataSourceRegion string `json:"dataSourceRegion,omitempty"`
+	// +optional
+	EstimatedEgressGbPerHour float64 `json:"estimatedEgressGbPerHour,omitempty"`
+	// +optional
+	MaxTCOEurPerHour float64 `json:"maxTCOEurPerHour,omitempty"`
+}
+
 // NodeClaimStatus defines the observed state of NodeClaim
 type NodeClaimStatus struct {
 	// Phase is the current phase of the NodeClaim
@@ -95,6 +123,16 @@ type NodeClaimStatus struct {
 	// NodeName is the name of the Kubernetes node
 	// +optional
 	NodeName string `json:"nodeName,omitempty"`
+
+	// RecommendationRequest is the CloudBroker request that led to this NodeClaim.
+	// Set by the NodePool controller when creating the NodeClaim.
+	// +optional
+	RecommendationRequest *RecommendationRequestSummary `json:"recommendationRequest,omitempty"`
+
+	// RecommendationUsed is the CloudBroker recommendation that led to this provision.
+	// Set when the instance is created (transition to Provisioning).
+	// +optional
+	RecommendationUsed *InstanceDetails `json:"recommendationUsed,omitempty"`
 
 	// LastError contains the last error message if any
 	// +optional

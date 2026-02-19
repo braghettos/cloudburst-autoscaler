@@ -61,6 +61,9 @@ log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# Source common UI deploy/verify (optional)
+[ -f "${SCRIPT_DIR}/e2e-common-ui.sh" ] && source "${SCRIPT_DIR}/e2e-common-ui.sh"
+
 # ── AMI Resolution ─────────────────────────────────────────────────────────────
 
 resolve_aws_ami() {
@@ -127,27 +130,32 @@ get_tailscale_ip() {
     echo "$ip"
 }
 
-# ── AWS EC2 cleanup (cb-* tagged or named instances) ─────────────────────────────
+# ── AWS EC2 cleanup (cb-* tagged instances, multi-region) ───────────────────────
+
+# Regions to check; CloudBroker may place instances in any region.
+# Use test region only (from NodeClass). Override with AWS_CLEANUP_REGIONS for broader cleanup.
+AWS_CLEANUP_REGIONS="${AWS_CLEANUP_REGIONS:-${AWS_REGION}}"
 
 delete_idle_aws_instances() {
-    log_info "Cleaning up existing cb-* EC2 instances..."
+    log_info "Cleaning up existing cb-* EC2 instances (regions: ${AWS_CLEANUP_REGIONS})..."
     if ! command -v aws &>/dev/null; then
         log_warn "aws CLI not found; skipping pre-cleanup of EC2 instances"
         return 0
     fi
-    local ids
-    ids=$(aws ec2 describe-instances --region "${AWS_REGION}" \
-        --filters "Name=tag:Name,Values=cb-*" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
-        --query 'Reservations[*].Instances[*].InstanceId' --output text 2>/dev/null || true)
-    if [ -z "$ids" ]; then
-        log_info "No cb-* EC2 instances found"
-        return 0
-    fi
-    for id in $ids; do
-        log_info "Terminating EC2 instance: $id"
-        aws ec2 terminate-instances --region "${AWS_REGION}" --instance-ids "$id" 2>/dev/null || true
+    local total=0 region ids id
+    for region in $AWS_CLEANUP_REGIONS; do
+        ids=$(aws ec2 describe-instances --region "$region" \
+            --filters "Name=tag:Name,Values=cb-*" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+            --query 'Reservations[*].Instances[*].InstanceId' --output text 2>/dev/null || true)
+        if [ -n "$ids" ]; then
+            for id in $ids; do
+                log_info "Terminating EC2 instance: $id (region: $region)"
+                aws ec2 terminate-instances --region "$region" --instance-ids "$id" 2>/dev/null || true
+                total=$((total + 1))
+            done
+        fi
     done
-    log_info "✓ Idle EC2 instances cleanup requested"
+    [ $total -gt 0 ] && log_info "✓ Terminated $total idle cb-* instance(s)" || log_info "No cb-* EC2 instances found"
 }
 
 # ── Kind Cluster ───────────────────────────────────────────────────────────────
@@ -609,12 +617,23 @@ wait_for_aws_instance_terminated() {
 
 # ── Cleanup ────────────────────────────────────────────────────────────────────
 
+# Do NOT delete the Kind cluster until pod is gone, NodeClaim is gone, and EC2 instance is terminated.
+# If any step times out (pod: 60s, nodeclaim: SCALEDOWN_TIMEOUT, instance: VM_DELETION_TIMEOUT), force teardown: terminate all cb-* instances, then delete Kind.
+
 CLEANUP_DONE=""
 cleanup() {
     [ -n "${CLEANUP_DONE:-}" ] && return
     CLEANUP_DONE=1
-    log_info "Cleaning up test resources..."
-    local instance_id ec2_id
+    declare -f stop_ui &>/dev/null && stop_ui
+    log_info "Cleaning up test resources (will not delete Kind until pod, NodeClaim, and instance are gone)..."
+    local instance_id ec2_id ec2_region force_teardown=0
+    local kind_ctx="kind-${KIND_CLUSTER_NAME:-cloudburst}"
+    # If cluster is unreachable (e.g. never created or already gone), skip graceful wait
+    if ! kubectl cluster-info --context "${kind_ctx}" &>/dev/null; then
+        log_warn "Kind cluster unreachable - will force teardown (instances only)"
+        force_teardown=1
+    fi
+    # Capture instance info BEFORE any deletions (NodeClaim may be deleted by controller)
     instance_id=$(kubectl get nodeclaim "${NODECLAIM_NAME:-none}" -n "${TEST_NAMESPACE}" -o jsonpath='{.status.instanceID}' 2>/dev/null || echo "")
     ec2_id=""
     ec2_region="${AWS_REGION}"
@@ -624,23 +643,86 @@ cleanup() {
     elif [ -n "$instance_id" ]; then
         ec2_id="$instance_id"
     fi
+
+    # Steps 1-4: only when cluster is reachable
+    if [ "$force_teardown" -eq 0 ]; then
+    # Step 1: Ensure pod is deleted
+    log_info "Ensuring pod ${PENDING_POD_NAME} is deleted..."
     kubectl delete pod "${PENDING_POD_NAME}" -n "${TEST_NAMESPACE}" --ignore-not-found=true --grace-period=0 --force 2>/dev/null || true
+    local waited=0
+    local pod_timeout=60
+    while [ $waited -lt $pod_timeout ]; do
+        if ! kubectl get pod "${PENDING_POD_NAME}" -n "${TEST_NAMESPACE}" &>/dev/null; then
+            log_info "✓ Pod deleted"
+            break
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
+    if kubectl get pod "${PENDING_POD_NAME}" -n "${TEST_NAMESPACE}" &>/dev/null; then
+        log_warn "Pod still exists after ${pod_timeout}s - will force teardown"
+        force_teardown=1
+    fi
+
+    # Step 2: Delete NodeClaim(s) to trigger controller to delete instance
     if [ -n "${NODECLAIM_NAME:-}" ] && [ "$NODECLAIM_NAME" != "none" ]; then
         kubectl delete nodeclaim "${NODECLAIM_NAME}" -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
     fi
     kubectl delete nodeclaims --all -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
-    if [ -n "$ec2_id" ] && command -v aws &>/dev/null; then
-        log_info "Waiting for EC2 instance $ec2_id (region: $ec2_region) to terminate..."
-        local waited=0
-        local state
-        local term_timeout=${VM_DELETION_TIMEOUT:-300}
-        while [ $waited -lt "$term_timeout" ]; do
-            state=$(aws ec2 describe-instances --region "${ec2_region}" --instance-ids "${ec2_id}" --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo "unknown")
-            [ "$state" = "terminated" ] && { log_info "✓ EC2 instance terminated"; break; }
-            sleep 15; waited=$((waited+15))
+
+    # Step 3: Wait for NodeClaim(s) to be deleted
+        local nc_timeout=${SCALEDOWN_TIMEOUT:-300}
+        waited=0
+        log_info "Waiting for NodeClaim(s) to be deleted (timeout: ${nc_timeout}s)..."
+        while [ $waited -lt $nc_timeout ]; do
+            local claims
+            claims=$(kubectl get nodeclaims -n "${TEST_NAMESPACE}" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+            if [ "${claims:-0}" -eq 0 ]; then
+                log_info "✓ NodeClaim(s) deleted"
+                break
+            fi
+            sleep 10
+            waited=$((waited + 10))
         done
+        claims=$(kubectl get nodeclaims -n "${TEST_NAMESPACE}" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+        if [ "${claims:-0}" -gt 0 ]; then
+            log_warn "NodeClaim(s) still exist after ${nc_timeout}s - will force teardown"
+            force_teardown=1
+        fi
+
+    # Step 4: Wait for EC2 instance to be terminated
+    if [ "$force_teardown" -eq 0 ] && [ -n "$ec2_id" ] && command -v aws &>/dev/null; then
+        local term_timeout=${VM_DELETION_TIMEOUT:-300}
+        waited=0
+        log_info "Waiting for EC2 instance $ec2_id (region: $ec2_region) to terminate (timeout: ${term_timeout}s)..."
+        while [ $waited -lt $term_timeout ]; do
+            local state
+            state=$(aws ec2 describe-instances --region "${ec2_region}" --instance-ids "${ec2_id}" --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo "unknown")
+            if [ "$state" = "terminated" ]; then
+                log_info "✓ EC2 instance terminated"
+                break
+            fi
+            sleep 15
+            waited=$((waited + 15))
+        done
+        state=$(aws ec2 describe-instances --region "${ec2_region}" --instance-ids "${ec2_id}" --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo "unknown")
+        if [ "$state" != "terminated" ]; then
+            log_warn "EC2 instance still ${state} after ${term_timeout}s - will force teardown"
+            force_teardown=1
+        fi
     fi
+    fi
+
+    if [ "$force_teardown" -eq 1 ]; then
+        log_warn "=== Teardown timeout - forcing manual cleanup (Kind cluster + all cb-* EC2 instances) ==="
+        delete_idle_aws_instances 2>/dev/null || true
+    fi
+
+    # Final sweep: any orphaned cb-* in this test's region before teardown
+    log_info "Sweeping orphaned cb-* instances in region(s) used by this test..."
     delete_idle_aws_instances 2>/dev/null || true
+
+    # Delete Kind cluster and remaining K8s resources
     kubectl delete nodepool "${NODEPOOL_NAME}" -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
     kubectl delete nodeclass "${NODECLASS_NAME}" -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
     kubectl delete secret tailscale-auth -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
@@ -677,6 +759,7 @@ main() {
     echo ""
     deploy_controller
     echo ""
+    if declare -f deploy_ui &>/dev/null; then deploy_ui || exit 1; echo ""; verify_ui_ready || exit 1; echo ""; fi
     create_tailscale_secret
     echo ""
     create_aws_secret

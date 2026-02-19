@@ -40,7 +40,7 @@ KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-cloudburst}"
 TEST_NAMESPACE="${TEST_NAMESPACE:-default}"
 CONTROLLER_NAMESPACE="cloudburst-system"
 NODECLASS_NAME="e2e-nodeclass"
-NODEPOOL_NAME="e2e-nodepool"
+NODEPOOL_NAME="e2e-gcp-nodepool"
 CONTROLLER_IMAGE="cloudburst-autoscaler:e2e"
 PENDING_POD_NAME="e2e-resource-hungry-pod"
 
@@ -55,6 +55,9 @@ VM_DELETION_TIMEOUT="${VM_DELETION_TIMEOUT:-180}"
 log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+# Source common UI deploy/verify (optional)
+[ -f "${SCRIPT_DIR}/e2e-common-ui.sh" ] && source "${SCRIPT_DIR}/e2e-common-ui.sh"
 
 # ── Prerequisites ──────────────────────────────────────────────────────────────
 
@@ -96,16 +99,22 @@ get_tailscale_ip() {
 
 # ── GCP VM Cleanup ─────────────────────────────────────────────────────────────
 
+# Uses GCP_ZONE when set (from NodeClass) to scope cleanup to this test's zone.
 delete_idle_gcp_vms() {
-    log_info "Cleaning up existing cb-* GCP VMs..."
-    local list
-    list=$(gcloud compute instances list --project="${GCP_PROJECT}" --filter="zone:${GCP_ZONE} name~^cb-" --format="value(name)" 2>/dev/null || true)
-    [ -z "$list" ] && { log_info "No cb-* VMs"; return 0; }
-    for name in $list; do
-        log_info "Deleting VM: $name"
-        gcloud compute instances delete "$name" --zone="${GCP_ZONE}" --project="${GCP_PROJECT}" --quiet 2>/dev/null || true
-    done
-    log_info "✓ Idle GCP VMs cleaned up"
+    log_info "Cleaning up existing cb-* GCP VMs${GCP_ZONE:+ (zone: ${GCP_ZONE})}..."
+    if ! command -v gcloud &>/dev/null; then
+        log_warn "gcloud not found; skipping GCP VM cleanup"
+        return 0
+    fi
+    local total=0 name zone zones_arg=""
+    [ -n "${GCP_ZONE}" ] && zones_arg="--zones=${GCP_ZONE}"
+    while IFS=',' read -r name zone; do
+        [ -z "$name" ] && continue
+        log_info "Deleting VM: $name (zone: $zone)"
+        gcloud compute instances delete "$name" --zone="${zone}" --project="${GCP_PROJECT}" --quiet 2>/dev/null || true
+        total=$((total + 1))
+    done < <(gcloud compute instances list --project="${GCP_PROJECT}" --filter="name~^cb-" ${zones_arg} --format="csv[no-heading](name,zone.basename())" 2>/dev/null || true)
+    [ $total -gt 0 ] && log_info "✓ Deleted $total cb-* VM(s)" || log_info "No cb-* VMs found"
 }
 
 # ── Kind Cluster ───────────────────────────────────────────────────────────────
@@ -590,49 +599,117 @@ wait_for_gcp_vm_deletion() {
 
 # ── Cleanup ────────────────────────────────────────────────────────────────────
 
+# Do NOT delete the Kind cluster until pod is gone, NodeClaim is gone, and GCP VM is deleted.
+# If any step times out (pod: 60s, nodeclaim: SCALEDOWN_TIMEOUT, vm: VM_DELETION_TIMEOUT), force teardown: delete all cb-* VMs, then delete Kind.
+
 CLEANUP_DONE=""
 cleanup() {
     [ -n "${CLEANUP_DONE:-}" ] && return
     CLEANUP_DONE=1
-    log_info "Cleaning up test resources..."
-
-    # Get instance name for GCP cleanup
-    local instance_id instance_name
+    declare -f stop_ui &>/dev/null && stop_ui
+    log_info "Cleaning up test resources (will not delete Kind until pod, NodeClaim, and GCP VM are gone)..."
+    local instance_id instance_name instance_zone force_teardown=0
+    local kind_ctx="kind-${KIND_CLUSTER_NAME:-cloudburst}"
+    # If cluster is unreachable (e.g. never created or already gone), skip graceful wait
+    if ! kubectl cluster-info --context "${kind_ctx}" &>/dev/null; then
+        log_warn "Kind cluster unreachable - will force teardown (VMs only)"
+        force_teardown=1
+    fi
+    # Capture instance info BEFORE any deletions (NodeClaim may be deleted by controller)
+    # Format: projects/PROJECT/zones/ZONE/instances/NAME
     instance_id=$(kubectl get nodeclaim "${NODECLAIM_NAME:-none}" -n "${TEST_NAMESPACE}" -o jsonpath='{.status.instanceID}' 2>/dev/null || echo "")
     instance_name=""
-    [ -n "$instance_id" ] && instance_name=$(echo "$instance_id" | awk -F'/' '{print $NF}')
+    instance_zone="${GCP_ZONE}"
+    if [ -n "$instance_id" ]; then
+        instance_name=$(echo "$instance_id" | awk -F'/' '{print $NF}')
+        # Parse zone from projects/PROJECT/zones/ZONE/instances/NAME
+        if [[ "$instance_id" == *"/zones/"*"/instances/"* ]]; then
+            instance_zone=$(echo "$instance_id" | sed -E 's|.*/zones/([^/]+)/instances/.*|\1|')
+            [[ "$instance_zone" == "$instance_id" ]] && instance_zone="${GCP_ZONE}"
+        fi
+    fi
 
-    # Delete the pending pod
+    # Steps 1-4: only when cluster is reachable
+    if [ "$force_teardown" -eq 0 ]; then
+    # Step 1: Ensure pod is deleted
+    log_info "Ensuring pod ${PENDING_POD_NAME} is deleted..."
     kubectl delete pod "${PENDING_POD_NAME}" -n "${TEST_NAMESPACE}" --ignore-not-found=true --grace-period=0 --force 2>/dev/null || true
+    local waited=0
+    local pod_timeout=60
+    while [ $waited -lt $pod_timeout ]; do
+        if ! kubectl get pod "${PENDING_POD_NAME}" -n "${TEST_NAMESPACE}" &>/dev/null; then
+            log_info "✓ Pod deleted"
+            break
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
+    if kubectl get pod "${PENDING_POD_NAME}" -n "${TEST_NAMESPACE}" &>/dev/null; then
+        log_warn "Pod still exists after ${pod_timeout}s - will force teardown"
+        force_teardown=1
+    fi
 
-    # Delete NodeClaim (controller will delete GCP VM)
+    # Step 2: Delete NodeClaim(s) to trigger controller to delete GCP VM
     if [ -n "${NODECLAIM_NAME:-}" ] && [ "$NODECLAIM_NAME" != "none" ]; then
         kubectl delete nodeclaim "${NODECLAIM_NAME}" -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
     fi
-    # Also delete any other nodeclaims
     kubectl delete nodeclaims --all -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
 
-    # Wait for GCP instance deletion
-    if [ -n "$instance_name" ]; then
-        log_info "Waiting for GCP instance $instance_name to be deleted..."
-        local waited=0
-        while [ $waited -lt 180 ]; do
-            gcloud compute instances describe "$instance_name" --zone="${GCP_ZONE}" --project="${GCP_PROJECT}" &>/dev/null || { log_info "✓ GCP instance deleted"; break; }
-            sleep 15; waited=$((waited+15))
-        done
+    # Step 3: Wait for NodeClaim(s) to be deleted
+    local nc_timeout=${SCALEDOWN_TIMEOUT:-300}
+    waited=0
+    log_info "Waiting for NodeClaim(s) to be deleted (timeout: ${nc_timeout}s)..."
+    while [ $waited -lt $nc_timeout ]; do
+        local claims
+        claims=$(kubectl get nodeclaims -n "${TEST_NAMESPACE}" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+        if [ "${claims:-0}" -eq 0 ]; then
+            log_info "✓ NodeClaim(s) deleted"
+            break
+        fi
+        sleep 10
+        waited=$((waited + 10))
+    done
+    claims=$(kubectl get nodeclaims -n "${TEST_NAMESPACE}" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    if [ "${claims:-0}" -gt 0 ]; then
+        log_warn "NodeClaim(s) still exist after ${nc_timeout}s - will force teardown"
+        force_teardown=1
     fi
 
-    # Delete other resources
+    # Step 4: Wait for GCP VM to be deleted
+    if [ "$force_teardown" -eq 0 ] && [ -n "$instance_name" ] && command -v gcloud &>/dev/null; then
+        local term_timeout=${VM_DELETION_TIMEOUT:-180}
+        waited=0
+        log_info "Waiting for GCP instance $instance_name (zone: $instance_zone) to be deleted (timeout: ${term_timeout}s)..."
+        while [ $waited -lt $term_timeout ]; do
+            if ! gcloud compute instances describe "$instance_name" --zone="${instance_zone}" --project="${GCP_PROJECT}" &>/dev/null; then
+                log_info "✓ GCP instance deleted"
+                break
+            fi
+            sleep 15
+            waited=$((waited + 15))
+        done
+        if gcloud compute instances describe "$instance_name" --zone="${instance_zone}" --project="${GCP_PROJECT}" &>/dev/null; then
+            log_warn "GCP instance still exists after ${term_timeout}s - will force teardown"
+            force_teardown=1
+        fi
+    fi
+    fi
+
+    if [ "$force_teardown" -eq 1 ]; then
+        log_warn "=== Teardown timeout - forcing manual cleanup (Kind cluster + all cb-* GCP VMs) ==="
+        delete_idle_gcp_vms 2>/dev/null || true
+    fi
+
+    # Final sweep: any orphaned cb-* in this test's zone before teardown
+    log_info "Sweeping orphaned cb-* VMs in zone used by this test..."
+    delete_idle_gcp_vms 2>/dev/null || true
+
+    # Delete Kind cluster and remaining K8s resources
     kubectl delete nodepool "${NODEPOOL_NAME}" -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
     kubectl delete nodeclass "${NODECLASS_NAME}" -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
     kubectl delete secret tailscale-auth -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
-
-    # Delete controller namespace
     kubectl delete namespace "${CONTROLLER_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
-
-    # Delete kind cluster
     kind delete cluster --name "${KIND_CLUSTER_NAME}" 2>/dev/null || true
-
     log_info "✓ Cleanup complete"
 }
 
@@ -666,7 +743,7 @@ main() {
     # 4. Deploy controller as Deployment
     deploy_controller
     echo ""
-
+    if declare -f deploy_ui &>/dev/null; then deploy_ui || exit 1; echo ""; verify_ui_ready || exit 1; echo ""; fi
     # 5. Create NodeClass, Tailscale secret, NodePool
     create_tailscale_secret
     echo ""
@@ -736,6 +813,26 @@ main() {
     kubectl get nodeclaims -n "${TEST_NAMESPACE}" -o wide 2>/dev/null || true
     echo ""
     kubectl get pods -n "${TEST_NAMESPACE}" -o wide
+
+    # Verify graph at http://localhost:8082/graph returns CloudBurst resources (NodePools, NodeClaims, Nodes, Pods)
+    if command -v curl &>/dev/null; then
+        log_info "Verifying graph data at http://localhost:8082/api/graph..."
+        local graph_json
+        graph_json=$(curl -s -S --connect-timeout 5 "http://127.0.0.1:8082/api/graph" 2>/dev/null || echo "{}")
+        if echo "$graph_json" | grep -qE 'cb-' ; then
+            log_info "✓ Graph contains CloudBurst resources - open http://localhost:8082/graph to verify"
+            # Brief window for browser verification (set GRAPH_VERIFY_SLEEP=0 to skip)
+            local sleep_sec="${GRAPH_VERIFY_SLEEP:-45}"
+            if [ "$sleep_sec" -gt 0 ]; then
+                log_info "Waiting ${sleep_sec}s for graph verification at http://localhost:8082/graph..."
+                sleep "$sleep_sec"
+            fi
+        elif [ -n "$graph_json" ]; then
+            log_warn "Graph API returned data but no CloudBurst nodes found; check http://localhost:8082/graph"
+        else
+            log_warn "Could not fetch /api/graph"
+        fi
+    fi
 
     # Save the GCP instance name for later verification
     local gcp_instance_id gcp_instance_name

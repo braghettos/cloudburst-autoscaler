@@ -62,6 +62,9 @@ log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# Source common UI deploy/verify (optional)
+[ -f "${SCRIPT_DIR}/e2e-common-ui.sh" ] && source "${SCRIPT_DIR}/e2e-common-ui.sh"
+
 # ── Prerequisites ──────────────────────────────────────────────────────────────
 
 check_prerequisites() {
@@ -105,6 +108,7 @@ get_tailscale_ip() {
 
 # ── Azure VM cleanup (cb-* VMs in resource group) ─────────────────────────────
 
+# Uses AZURE_RESOURCE_GROUP (from NodeClass) to scope cleanup to this test's resource group.
 delete_idle_azure_vms() {
     log_info "Cleaning up existing cb-* Azure VMs in resource group ${AZURE_RESOURCE_GROUP}..."
     if ! command -v az &>/dev/null; then
@@ -567,35 +571,73 @@ wait_for_azure_vm_deletion() {
     return 1
 }
 
+# Do NOT delete Kind until pod, NodeClaim, and Azure VM are gone. On timeout: force teardown (delete_idle_azure_vms + kind).
+
 CLEANUP_DONE=""
 cleanup() {
     [ -n "${CLEANUP_DONE:-}" ] && return
     CLEANUP_DONE=1
-    log_info "Cleaning up test resources..."
-    local instance_id vm_name
+    declare -f stop_ui &>/dev/null && stop_ui
+    log_info "Cleaning up (will not delete Kind until pod, NodeClaim, and Azure VM are gone)..."
+    local instance_id vm_name force_teardown=0
+    local kind_ctx="kind-${KIND_CLUSTER_NAME:-cloudburst}"
+    if ! kubectl cluster-info --context "${kind_ctx}" &>/dev/null; then
+        log_warn "Kind cluster unreachable - will force teardown (Azure VMs only)"
+        force_teardown=1
+    fi
     instance_id=$(kubectl get nodeclaim "${NODECLAIM_NAME:-none}" -n "${TEST_NAMESPACE}" -o jsonpath='{.status.instanceID}' 2>/dev/null || echo "")
     vm_name=""
-    if [ -n "$instance_id" ]; then
-        vm_name=$(echo "$instance_id" | awk -F'/' '{print $NF}')
-    fi
+    [ -n "$instance_id" ] && vm_name=$(echo "$instance_id" | awk -F'/' '{print $NF}')
+
+    if [ "$force_teardown" -eq 0 ]; then
+    log_info "Ensuring pod ${PENDING_POD_NAME} is deleted..."
     kubectl delete pod "${PENDING_POD_NAME}" -n "${TEST_NAMESPACE}" --ignore-not-found=true --grace-period=0 --force 2>/dev/null || true
+    local waited=0 pod_timeout=60
+    while [ $waited -lt $pod_timeout ]; do
+        if ! kubectl get pod "${PENDING_POD_NAME}" -n "${TEST_NAMESPACE}" &>/dev/null; then log_info "✓ Pod deleted"; break; fi
+        sleep 5; waited=$((waited + 5))
+    done
+    kubectl get pod "${PENDING_POD_NAME}" -n "${TEST_NAMESPACE}" &>/dev/null && { log_warn "Pod still exists after ${pod_timeout}s"; force_teardown=1; }
+
     if [ -n "${NODECLAIM_NAME:-}" ] && [ "$NODECLAIM_NAME" != "none" ]; then
         kubectl delete nodeclaim "${NODECLAIM_NAME}" -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
     fi
     kubectl delete nodeclaims --all -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
-    if [ -n "$vm_name" ] && command -v az &>/dev/null; then
-        log_info "Waiting for Azure VM $vm_name to be deleted..."
-        local waited=0
-        while [ $waited -lt 180 ]; do
-            az vm show --resource-group "${AZURE_RESOURCE_GROUP}" --name "${vm_name}" &>/dev/null || { log_info "✓ Azure VM deleted"; break; }
-            sleep 15; waited=$((waited+15))
+
+    local nc_timeout=${SCALEDOWN_TIMEOUT:-300}
+    waited=0
+    log_info "Waiting for NodeClaim(s) to be deleted (timeout: ${nc_timeout}s)..."
+    while [ $waited -lt $nc_timeout ]; do
+        local claims
+        claims=$(kubectl get nodeclaims -n "${TEST_NAMESPACE}" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+        [ "${claims:-0}" -eq 0 ] && { log_info "✓ NodeClaim(s) deleted"; break; }
+        sleep 10; waited=$((waited + 10))
+    done
+    claims=$(kubectl get nodeclaims -n "${TEST_NAMESPACE}" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    [ "${claims:-0}" -gt 0 ] && { log_warn "NodeClaim(s) still exist after ${nc_timeout}s"; force_teardown=1; }
+
+    if [ "$force_teardown" -eq 0 ] && [ -n "$vm_name" ] && command -v az &>/dev/null; then
+        local term_timeout=${VM_DELETION_TIMEOUT:-180}
+        waited=0
+        log_info "Waiting for Azure VM $vm_name to be deleted (timeout: ${term_timeout}s)..."
+        while [ $waited -lt $term_timeout ]; do
+            if ! az vm show --resource-group "${AZURE_RESOURCE_GROUP}" --name "${vm_name}" &>/dev/null; then
+                log_info "✓ Azure VM deleted"
+                break
+            fi
+            sleep 15; waited=$((waited + 15))
         done
+        az vm show --resource-group "${AZURE_RESOURCE_GROUP}" --name "${vm_name}" &>/dev/null && { log_warn "Azure VM still exists after ${term_timeout}s"; force_teardown=1; }
     fi
+    fi
+
+    [ "$force_teardown" -eq 1 ] && { log_warn "=== Teardown timeout - forcing manual cleanup (Kind + cb-* Azure VMs) ==="; delete_idle_azure_vms 2>/dev/null || true; }
+    # Final sweep: any orphaned cb-* in this test's resource group before teardown
+    log_info "Sweeping orphaned cb-* VMs in resource group ${AZURE_RESOURCE_GROUP}..."
     delete_idle_azure_vms 2>/dev/null || true
     kubectl delete nodepool "${NODEPOOL_NAME}" -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
     kubectl delete nodeclass "${NODECLASS_NAME}" -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
-    kubectl delete secret tailscale-auth -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
-    kubectl delete secret azure-credentials -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+    kubectl delete secret tailscale-auth azure-credentials -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
     kubectl delete namespace "${CONTROLLER_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
     kind delete cluster --name "${KIND_CLUSTER_NAME}" 2>/dev/null || true
     log_info "✓ Cleanup complete"
@@ -619,6 +661,7 @@ main() {
     echo ""
     deploy_controller
     echo ""
+    if declare -f deploy_ui &>/dev/null; then deploy_ui || exit 1; echo ""; verify_ui_ready || exit 1; echo ""; fi
     create_tailscale_secret
     echo ""
     create_azure_secret

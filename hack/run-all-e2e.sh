@@ -150,6 +150,15 @@ echo -e "${CYAN}╠════════════════════�
 echo -e "${CYAN}║  Logs: ${LOG_DIR}/${NC}"
 echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
 
+# Run cleanup-all to remove any orphaned cb-* instances (from failed tests or async provider deletion)
+echo ""
+echo -e "${GREEN}[INFO]${NC} Running cleanup-all to remove any orphaned instances..."
+if make -C "${PROJECT_ROOT}" cleanup-all 2>/dev/null; then
+    echo -e "${GREEN}[INFO]${NC} Cleanup complete"
+else
+    echo -e "${YELLOW}[WARN]${NC} Cleanup-all had warnings or partial failures (see above)"
+fi
+
 if [ $PROVIDERS_FAIL -gt 0 ]; then
     exit 1
 fi

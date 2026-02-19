@@ -164,6 +164,42 @@ env-align: ## Add any keys from .env.example that are missing in .env (keeps exi
 clean: ## Remove local build artifacts and E2E log directory.
 	rm -rf bin/ e2e-logs/
 
+.PHONY: ovh-cleanup
+ovh-cleanup: ## Delete orphaned cb-* OVH Cloud instances. Requires OVH_* env vars (from .env).
+	@[ -f .env ] && set -a && . .env && set +a; go run ./hack/ovh-cleanup/main.go
+
+.PHONY: aws-cleanup
+aws-cleanup: ## Terminate orphaned cb-* EC2 instances across regions. Requires AWS_* env vars (from .env).
+	@bash hack/aws-cleanup.sh
+
+.PHONY: gcp-cleanup
+gcp-cleanup: ## Delete orphaned cb-* GCP VMs across zones. Requires GCP_PROJECT, GOOGLE_APPLICATION_CREDENTIALS (from .env).
+	@[ -f .env ] && set -a && . .env && set +a; bash hack/gcp-cleanup.sh
+
+.PHONY: hetzner-cleanup
+hetzner-cleanup: ## Delete orphaned cb-* Hetzner Cloud servers. Requires HETZNER_API_TOKEN (from .env).
+	@[ -f .env ] && set -a && . .env && set +a; bash hack/hetzner-cleanup.sh
+
+.PHONY: scaleway-cleanup
+scaleway-cleanup: ## Delete orphaned cb-* Scaleway instances across zones. Requires SCW_SECRET_KEY (from .env).
+	@[ -f .env ] && set -a && . .env && set +a; bash hack/scaleway-cleanup.sh
+
+.PHONY: digitalocean-cleanup
+digitalocean-cleanup: ## Delete orphaned cb-* DigitalOcean droplets. Requires DIGITALOCEAN_API_TOKEN (from .env).
+	@[ -f .env ] && set -a && . .env && set +a; bash hack/digitalocean-cleanup.sh
+
+.PHONY: azure-cleanup
+azure-cleanup: ## Delete orphaned cb-* Azure VMs in resource group. Requires AZURE_* env vars (from .env).
+	@[ -f .env ] && set -a && . .env && set +a; bash hack/azure-cleanup.sh
+
+.PHONY: cleanup-all
+cleanup-all: ## Delete orphaned cb-* instances across all providers (GCP, AWS, Azure, Hetzner, Scaleway, DigitalOcean, OVH).
+	@[ -f .env ] && set -a && . .env && set +a; bash hack/cleanup-all-providers.sh
+
+.PHONY: run-all-e2e
+run-all-e2e: ## Run E2E tests for all providers with credentials set (Hetzner, Scaleway, DigitalOcean, OVH, Azure, GCP, AWS).
+	@bash hack/run-all-e2e.sh
+
 .PHONY: create-secrets
 create-secrets: create-namespace ## Create required secrets (GCP credentials and Tailscale auth key). Reads from .env file or command line.
 	@if [ -z "$(GCP_CREDENTIALS_FILE)" ] || [ ! -f "$(GCP_CREDENTIALS_FILE)" ]; then \

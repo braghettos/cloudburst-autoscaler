@@ -185,6 +185,24 @@ func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 		chosen := &recommendations[0]
 		alternatives := recommendations[1:]
+
+		// Log CloudBroker recommendations that will drive provisioning
+		logger.Info("CloudBroker recommendations",
+			"request", fmt.Sprintf("minVCPU=%d minRAMGb=%.1f regionConstraint=%q maxPrice=%.4f", brokerReq.MinVCPU, brokerReq.MinRAMGb, brokerReq.RegionConstraint, brokerReq.MaxPriceEurPerHour),
+			"chosen", fmt.Sprintf("%s/%s/%s (vcpu=%d ramGb=%.1f price=%.4f EUR/h)", chosen.Provider, chosen.Region, chosen.InstanceType, chosen.VCPU, chosen.RAMGb, chosen.PriceEurPerHour),
+			"alternativesCount", len(alternatives),
+		)
+		for i, alt := range alternatives {
+			logger.V(1).Info("CloudBroker alternative",
+				"rank", i+2,
+				"provider", alt.Provider,
+				"region", alt.Region,
+				"instanceType", alt.InstanceType,
+				"vcpu", alt.VCPU,
+				"ramGb", alt.RAMGb,
+				"priceEurPerHour", alt.PriceEurPerHour,
+			)
+		}
 		if chosen.Provider != "gcp" && chosen.Provider != "scaleway" && chosen.Provider != "hetzner" && chosen.Provider != "digitalocean" && chosen.Provider != "ovh" && chosen.Provider != "aws" && chosen.Provider != "azure" {
 			err := fmt.Errorf("recommendation provider is %q, only gcp, scaleway, hetzner, digitalocean, ovh, aws, and azure are supported", chosen.Provider)
 			logger.Error(err, "unsupported provider")
@@ -228,7 +246,7 @@ func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 		// Create NodeClaims using the matched NodeClass (chosen + alternatives for fallback on create failure)
 		for i := int32(0); i < nodesToCreate; i++ {
-			if err := r.createNodeClaim(ctx, nodePool, nodeClass, desiredCapacity, chosen, alternatives); err != nil {
+			if err := r.createNodeClaim(ctx, nodePool, nodeClass, desiredCapacity, &brokerReq, chosen, alternatives); err != nil {
 				logger.Error(err, "unable to create NodeClaim", "index", i)
 				r.recordEvent(nodePool, corev1.EventTypeWarning, "NodeClaimCreationFailed", fmt.Sprintf("Failed to create NodeClaim: %v", err))
 				continue
@@ -595,7 +613,7 @@ func (r *NodePoolReconciler) nodeClassSupportsProvider(nodeClass *cloudburstv1al
 	}
 }
 
-func (r *NodePoolReconciler) createNodeClaim(ctx context.Context, nodePool *cloudburstv1alpha1.NodePool, nodeClass *cloudburstv1alpha1.NodeClass, desiredCapacity planner.DesiredCapacity, chosen *cloudbroker.RecommendationResult, alternatives []cloudbroker.RecommendationResult) error {
+func (r *NodePoolReconciler) createNodeClaim(ctx context.Context, nodePool *cloudburstv1alpha1.NodePool, nodeClass *cloudburstv1alpha1.NodeClass, desiredCapacity planner.DesiredCapacity, brokerReq *cloudbroker.RecommendationRequest, chosen *cloudbroker.RecommendationResult, alternatives []cloudbroker.RecommendationResult) error {
 	logger := log.FromContext(ctx)
 
 	altDetails := make([]cloudburstv1alpha1.InstanceDetails, 0, len(alternatives))
@@ -654,10 +672,31 @@ func (r *NodePoolReconciler) createNodeClaim(ctx context.Context, nodePool *clou
 		return fmt.Errorf("failed to create NodeClaim: %w", err)
 	}
 
+	// Build RecommendationRequest from brokerReq for status
+	recReq := &cloudburstv1alpha1.RecommendationRequestSummary{
+		MinVCPU:            brokerReq.MinVCPU,
+		MinRAMGb:           brokerReq.MinRAMGb,
+		RegionConstraint:   brokerReq.RegionConstraint,
+		MaxPriceEurPerHour: brokerReq.MaxPriceEurPerHour,
+	}
+	if brokerReq.Arch != nil {
+		recReq.Arch = *brokerReq.Arch
+	}
+	if len(brokerReq.AllowedProviders) > 0 {
+		recReq.AllowedProviders = append([]string{}, brokerReq.AllowedProviders...)
+	}
+	if brokerReq.DataSourceProvider != "" {
+		recReq.DataSourceProvider = brokerReq.DataSourceProvider
+		recReq.DataSourceRegion = brokerReq.DataSourceRegion
+		recReq.EstimatedEgressGbPerHour = brokerReq.EstimatedEgressGbPerHour
+		recReq.MaxTCOEurPerHour = brokerReq.MaxTCOEurPerHour
+	}
+
 	// The API server strips status on Create, so set the initial status via a
 	// separate status update.
 	nodeClaim.Status = cloudburstv1alpha1.NodeClaimStatus{
-		Phase: cloudburstv1alpha1.NodeClaimPhasePending,
+		Phase:                cloudburstv1alpha1.NodeClaimPhasePending,
+		RecommendationRequest: recReq,
 		Timestamps: cloudburstv1alpha1.NodeClaimTimestamps{
 			CreatedAt:      metav1.Now(),
 			LastTransition: metav1.Now(),

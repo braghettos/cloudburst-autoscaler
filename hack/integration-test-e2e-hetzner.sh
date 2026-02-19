@@ -58,6 +58,12 @@ log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# Source common UI deploy/verify (optional)
+if [ -f "${SCRIPT_DIR}/e2e-common-ui.sh" ]; then
+    # shellcheck source=./e2e-common-ui.sh
+    source "${SCRIPT_DIR}/e2e-common-ui.sh"
+fi
+
 # ── Prerequisites ──────────────────────────────────────────────────────────────
 
 check_prerequisites() {
@@ -106,6 +112,7 @@ get_tailscale_ip() {
 
 # ── Hetzner VM Cleanup ─────────────────────────────────────────────────────────
 
+# Hetzner has no location filter in API; cleans all cb-* servers (account-wide).
 delete_idle_hetzner_vms() {
     log_info "Cleaning up existing cb-* Hetzner VMs..."
 
@@ -126,7 +133,7 @@ delete_idle_hetzner_vms() {
         # Use curl with Hetzner API directly
         local response
         response=$(curl -s -H "Authorization: Bearer ${HETZNER_API_TOKEN}" \
-            "https://api.hetzner.cloud/v1/servers?label_selector=&name=cb-" 2>/dev/null || true)
+            "https://api.hetzner.cloud/v1/servers?per_page=50" 2>/dev/null || true)
         local server_ids
         server_ids=$(echo "$response" | python3 -c "
 import sys, json
@@ -628,59 +635,77 @@ wait_for_hetzner_vm_deletion() {
 
 # ── Cleanup ────────────────────────────────────────────────────────────────────
 
+# Do NOT delete Kind until pod, NodeClaim, and Hetzner instance are gone. On timeout: force teardown (delete_idle_hetzner_vms + kind).
+
 CLEANUP_DONE=""
 cleanup() {
     [ -n "${CLEANUP_DONE:-}" ] && return
     CLEANUP_DONE=1
-    log_info "Cleaning up test resources..."
-
-    # Get instance info for Hetzner cleanup
-    local instance_id hetzner_server_id
+    declare -f stop_ui &>/dev/null && stop_ui
+    log_info "Cleaning up (will not delete Kind until pod, NodeClaim, and Hetzner instance are gone)..."
+    local instance_id hetzner_server_id force_teardown=0
+    local kind_ctx="kind-${KIND_CLUSTER_NAME:-cloudburst}"
+    if ! kubectl cluster-info --context "${kind_ctx}" &>/dev/null; then
+        log_warn "Kind cluster unreachable - will force teardown (VMs only)"
+        force_teardown=1
+    fi
     instance_id=$(kubectl get nodeclaim "${NODECLAIM_NAME:-none}" -n "${TEST_NAMESPACE}" -o jsonpath='{.status.instanceID}' 2>/dev/null || echo "")
     hetzner_server_id=""
-    if [ -n "$instance_id" ]; then
-        # Instance ID format: hetzner/<location>/<server-id>
-        hetzner_server_id=$(echo "$instance_id" | awk -F'/' '{print $NF}')
-    fi
+    [ -n "$instance_id" ] && hetzner_server_id=$(echo "$instance_id" | awk -F'/' '{print $NF}')
 
-    # Delete the pending pod
+    if [ "$force_teardown" -eq 0 ]; then
+    log_info "Ensuring pod ${PENDING_POD_NAME} is deleted..."
     kubectl delete pod "${PENDING_POD_NAME}" -n "${TEST_NAMESPACE}" --ignore-not-found=true --grace-period=0 --force 2>/dev/null || true
+    local waited=0 pod_timeout=60
+    while [ $waited -lt $pod_timeout ]; do
+        if ! kubectl get pod "${PENDING_POD_NAME}" -n "${TEST_NAMESPACE}" &>/dev/null; then log_info "✓ Pod deleted"; break; fi
+        sleep 5; waited=$((waited + 5))
+    done
+    kubectl get pod "${PENDING_POD_NAME}" -n "${TEST_NAMESPACE}" &>/dev/null && { log_warn "Pod still exists after ${pod_timeout}s"; force_teardown=1; }
 
-    # Delete NodeClaim (controller will delete Hetzner VM)
     if [ -n "${NODECLAIM_NAME:-}" ] && [ "$NODECLAIM_NAME" != "none" ]; then
         kubectl delete nodeclaim "${NODECLAIM_NAME}" -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
     fi
     kubectl delete nodeclaims --all -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
 
-    # Wait for Hetzner instance deletion
-    if [ -n "$hetzner_server_id" ]; then
-        log_info "Waiting for Hetzner server $hetzner_server_id to be deleted..."
-        local waited=0
-        while [ $waited -lt 180 ]; do
+    local nc_timeout=${SCALEDOWN_TIMEOUT:-300}
+    waited=0
+    log_info "Waiting for NodeClaim(s) to be deleted (timeout: ${nc_timeout}s)..."
+    while [ $waited -lt $nc_timeout ]; do
+        local claims
+        claims=$(kubectl get nodeclaims -n "${TEST_NAMESPACE}" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+        [ "${claims:-0}" -eq 0 ] && { log_info "✓ NodeClaim(s) deleted"; break; }
+        sleep 10; waited=$((waited + 10))
+    done
+    claims=$(kubectl get nodeclaims -n "${TEST_NAMESPACE}" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    [ "${claims:-0}" -gt 0 ] && { log_warn "NodeClaim(s) still exist after ${nc_timeout}s"; force_teardown=1; }
+
+    if [ "$force_teardown" -eq 0 ] && [ -n "$hetzner_server_id" ]; then
+        local term_timeout=${VM_DELETION_TIMEOUT:-180}
+        waited=0
+        log_info "Waiting for Hetzner server $hetzner_server_id to be deleted (timeout: ${term_timeout}s)..."
+        while [ $waited -lt $term_timeout ]; do
             local sc
-            sc=$(curl -s -o /dev/null -w "%{http_code}" \
-                -H "Authorization: Bearer ${HETZNER_API_TOKEN}" \
+            sc=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${HETZNER_API_TOKEN}" \
                 "https://api.hetzner.cloud/v1/servers/${hetzner_server_id}" 2>/dev/null || echo "000")
             [ "$sc" = "404" ] && { log_info "✓ Hetzner server deleted"; break; }
-            sleep 15; waited=$((waited+15))
+            sleep 15; waited=$((waited + 15))
         done
+        sc=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${HETZNER_API_TOKEN}" \
+            "https://api.hetzner.cloud/v1/servers/${hetzner_server_id}" 2>/dev/null || echo "000")
+        [ "$sc" != "404" ] && { log_warn "Hetzner server still exists after ${term_timeout}s"; force_teardown=1; }
+    fi
     fi
 
-    # Also delete any remaining cb-* servers via API (belt and suspenders)
+    [ "$force_teardown" -eq 1 ] && { log_warn "=== Teardown timeout - forcing manual cleanup (Kind + cb-* Hetzner VMs) ==="; delete_idle_hetzner_vms 2>/dev/null || true; }
+    # Final sweep: orphaned cb-* servers (Hetzner is account-wide; location not filterable via API)
+    log_info "Sweeping orphaned cb-* Hetzner servers..."
     delete_idle_hetzner_vms 2>/dev/null || true
-
-    # Delete other resources
     kubectl delete nodepool "${NODEPOOL_NAME}" -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
     kubectl delete nodeclass "${NODECLASS_NAME}" -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
-    kubectl delete secret tailscale-auth -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
-    kubectl delete secret hetzner-api-token -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
-
-    # Delete controller namespace
+    kubectl delete secret tailscale-auth hetzner-api-token -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
     kubectl delete namespace "${CONTROLLER_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
-
-    # Delete kind cluster
     kind delete cluster --name "${KIND_CLUSTER_NAME}" 2>/dev/null || true
-
     log_info "✓ Cleanup complete"
 }
 
@@ -713,6 +738,14 @@ main() {
     # 4. Deploy controller as Deployment
     deploy_controller
     echo ""
+
+    # 4b. Deploy and verify UI (if cloudburst-autoscaler-ui exists)
+    if declare -f deploy_ui &>/dev/null; then
+        deploy_ui || exit 1
+        echo ""
+        verify_ui_ready || exit 1
+        echo ""
+    fi
 
     # 5. Create secrets, NodeClass, NodePool
     create_tailscale_secret
@@ -782,6 +815,26 @@ main() {
     kubectl get nodeclaims -n "${TEST_NAMESPACE}" -o wide 2>/dev/null || true
     echo ""
     kubectl get pods -n "${TEST_NAMESPACE}" -o wide
+
+    # Verify graph at http://localhost:8082/graph returns CloudBurst resources (NodePools, NodeClaims, Nodes, Pods)
+    if command -v curl &>/dev/null; then
+        log_info "Verifying graph data at http://localhost:8082/api/graph..."
+        local graph_json
+        graph_json=$(curl -s -S --connect-timeout 5 "http://127.0.0.1:8082/api/graph" 2>/dev/null || echo "{}")
+        if echo "$graph_json" | grep -qE 'cb-' ; then
+            log_info "✓ Graph contains CloudBurst resources - open http://localhost:8082/graph to verify"
+            # Brief window for browser verification (set GRAPH_VERIFY_SLEEP=0 to skip)
+            local sleep_sec="${GRAPH_VERIFY_SLEEP:-45}"
+            if [ "$sleep_sec" -gt 0 ]; then
+                log_info "Waiting ${sleep_sec}s for graph verification at http://localhost:8082/graph..."
+                sleep "$sleep_sec"
+            fi
+        elif [ -n "$graph_json" ]; then
+            log_warn "Graph API returned data but no CloudBurst nodes found; check http://localhost:8082/graph"
+        else
+            log_warn "Could not fetch /api/graph"
+        fi
+    fi
 
     # Save the Hetzner server ID for later verification
     local saved_instance_id saved_server_id

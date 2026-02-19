@@ -51,11 +51,30 @@ PROVISIONING_TIMEOUT="${PROVISIONING_TIMEOUT:-600}"
 READY_TIMEOUT="${READY_TIMEOUT:-600}"
 POD_SCHEDULED_TIMEOUT="${POD_SCHEDULED_TIMEOUT:-120}"
 SCALEDOWN_TIMEOUT="${SCALEDOWN_TIMEOUT:-300}"
-VM_DELETION_TIMEOUT="${VM_DELETION_TIMEOUT:-180}"
+VM_DELETION_TIMEOUT="${VM_DELETION_TIMEOUT:-300}"
 
 log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+# Source common UI deploy/verify (optional)
+[ -f "${SCRIPT_DIR}/e2e-common-ui.sh" ] && source "${SCRIPT_DIR}/e2e-common-ui.sh"
+
+# OVH cleanup is project-scoped via OVH_PROJECT_ID (from NodeClass).
+cleanup_ovh_instances() {
+    log_info "Cleaning up existing cb-* OVH instances..."
+    if ! command -v go &>/dev/null; then
+        log_warn "go not found; skipping OVH pre-cleanup"
+        return 0
+    fi
+    cd "${PROJECT_ROOT}" || return 0
+    if go run ./hack/ovh-cleanup/main.go 2>/dev/null; then
+        log_info "OVH cleanup done (or no cb-* instances)"
+    else
+        log_warn "OVH cleanup failed or no instances found"
+    fi
+    cd - >/dev/null || true
+}
 
 check_prerequisites() {
     log_info "Checking prerequisites..."
@@ -470,14 +489,68 @@ wait_for_nodeclaim_deletion() {
     return 1
 }
 
+# Do NOT delete Kind until pod, NodeClaim, and OVH instance are gone. On timeout: force teardown (cleanup_ovh_instances + kind).
+
 CLEANUP_DONE=""
 cleanup() {
     [ -n "${CLEANUP_DONE:-}" ] && return
     CLEANUP_DONE=1
-    log_info "Cleaning up..."
+    declare -f stop_ui &>/dev/null && stop_ui
+    log_info "Cleaning up (will not delete Kind until pod, NodeClaim, and OVH instance are gone)..."
+    local instance_id force_teardown=0
+    local kind_ctx="kind-${KIND_CLUSTER_NAME:-cloudburst}"
+    if ! kubectl cluster-info --context "${kind_ctx}" &>/dev/null; then
+        log_warn "Kind cluster unreachable - will force teardown (OVH instances only)"
+        force_teardown=1
+    fi
+    instance_id=$(kubectl get nodeclaim "${NODECLAIM_NAME:-none}" -n "${TEST_NAMESPACE}" -o jsonpath='{.status.instanceID}' 2>/dev/null || echo "")
+
+    if [ "$force_teardown" -eq 0 ]; then
+    log_info "Ensuring pod ${PENDING_POD_NAME} is deleted..."
     kubectl delete pod "${PENDING_POD_NAME}" -n "${TEST_NAMESPACE}" --ignore-not-found=true --grace-period=0 --force 2>/dev/null || true
+    local waited=0 pod_timeout=60
+    while [ $waited -lt $pod_timeout ]; do
+        if ! kubectl get pod "${PENDING_POD_NAME}" -n "${TEST_NAMESPACE}" &>/dev/null; then log_info "✓ Pod deleted"; break; fi
+        sleep 5; waited=$((waited + 5))
+    done
+    kubectl get pod "${PENDING_POD_NAME}" -n "${TEST_NAMESPACE}" &>/dev/null && { log_warn "Pod still exists after ${pod_timeout}s"; force_teardown=1; }
+
     [ -n "${NODECLAIM_NAME:-}" ] && [ "$NODECLAIM_NAME" != "none" ] && kubectl delete nodeclaim "${NODECLAIM_NAME}" -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
     kubectl delete nodeclaims --all -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+
+    local nc_timeout=${SCALEDOWN_TIMEOUT:-300}
+    waited=0
+    log_info "Waiting for NodeClaim(s) to be deleted (timeout: ${nc_timeout}s)..."
+    while [ $waited -lt $nc_timeout ]; do
+        local claims
+        claims=$(kubectl get nodeclaims -n "${TEST_NAMESPACE}" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+        [ "${claims:-0}" -eq 0 ] && { log_info "✓ NodeClaim(s) deleted"; break; }
+        sleep 10; waited=$((waited + 10))
+    done
+    claims=$(kubectl get nodeclaims -n "${TEST_NAMESPACE}" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    [ "${claims:-0}" -gt 0 ] && { log_warn "NodeClaim(s) still exist after ${nc_timeout}s"; force_teardown=1; }
+
+    if [ "$force_teardown" -eq 0 ] && [ -n "$instance_id" ] && command -v go &>/dev/null; then
+        local term_timeout=${VM_DELETION_TIMEOUT:-180}
+        waited=0
+        log_info "Waiting for OVH instance $instance_id to be deleted (timeout: ${term_timeout}s)..."
+        cd "${PROJECT_ROOT}" || true
+        while [ $waited -lt $term_timeout ]; do
+            if go run ./hack/ovh-cleanup/main.go --verify="${instance_id}" 2>/dev/null; then
+                log_info "✓ OVH instance deleted"
+                break
+            fi
+            sleep 10; waited=$((waited + 10))
+        done
+        go run ./hack/ovh-cleanup/main.go --verify="${instance_id}" 2>/dev/null || { log_warn "OVH instance still exists after ${term_timeout}s"; force_teardown=1; }
+        cd - >/dev/null || true
+    fi
+    fi
+
+    [ "$force_teardown" -eq 1 ] && { log_warn "=== Teardown timeout - forcing manual cleanup (Kind + cb-* OVH instances) ==="; cleanup_ovh_instances 2>/dev/null || true; }
+    # Final sweep: orphaned cb-* in this test's project (OVH_PROJECT_ID) before teardown
+    log_info "Sweeping orphaned cb-* OVH instances in project ${OVH_PROJECT_ID}..."
+    cleanup_ovh_instances 2>/dev/null || true
     kubectl delete nodepool "${NODEPOOL_NAME}" -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
     kubectl delete nodeclass "${NODECLASS_NAME}" -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
     kubectl delete secret tailscale-auth ovh-api-credentials -n "${TEST_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
@@ -486,11 +559,34 @@ cleanup() {
     log_info "✓ Cleanup complete"
 }
 
+verify_ovh_instance_deleted() {
+    local instance_id=$1
+    local timeout=${2:-180}
+    local elapsed=0
+    log_info "Verifying OVH instance ${instance_id} is deleted (timeout: ${timeout}s)..."
+    cd "${PROJECT_ROOT}" || return 1
+    while [ $elapsed -lt $timeout ]; do
+        if go run ./hack/ovh-cleanup/main.go --verify="${instance_id}" 2>/dev/null; then
+            log_info "✓ OVH instance ${instance_id} confirmed deleted"
+            cd - >/dev/null || true
+            return 0
+        fi
+        echo -n "."
+        sleep 10
+        elapsed=$((elapsed + 10))
+    done
+    cd - >/dev/null || true
+    log_error "Timeout: OVH instance ${instance_id} still exists"
+    return 1
+}
+
 main() {
     log_info "=== CloudBurst E2E — OVH Cloud ==="
     log_info "OVH Region: ${OVH_REGION:-auto (CloudBroker)}, Project: ${OVH_PROJECT_ID}"
     echo ""
     check_prerequisites
+    echo ""
+    cleanup_ovh_instances
     echo ""
     setup_kind_cluster
     echo ""
@@ -500,6 +596,7 @@ main() {
     echo ""
     deploy_controller
     echo ""
+    if declare -f deploy_ui &>/dev/null; then deploy_ui || exit 1; echo ""; verify_ui_ready || exit 1; echo ""; fi
     create_tailscale_secret
     create_ovh_secret
     create_nodeclass
@@ -530,12 +627,23 @@ main() {
     fi
 
     echo ""
+    OVH_INSTANCE_ID=$(kubectl get nodeclaim "${NODECLAIM_NAME}" -n "${TEST_NAMESPACE}" -o jsonpath='{.status.instanceID}' 2>/dev/null || echo "")
     log_info "=== Scale-down ==="
     delete_pending_pod
     echo ""
     if ! wait_for_nodeclaim_deletion "${SCALEDOWN_TIMEOUT}"; then
         log_error "Scale-down failed"
         exit 1
+    fi
+
+    if [ -n "${OVH_INSTANCE_ID}" ]; then
+        echo ""
+        if ! verify_ovh_instance_deleted "${OVH_INSTANCE_ID}" "${VM_DELETION_TIMEOUT}"; then
+            log_error "OVH instance was not deleted"
+            exit 1
+        fi
+    else
+        log_warn "Could not capture instanceID for verification"
     fi
 
     echo ""
