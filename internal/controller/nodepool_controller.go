@@ -695,7 +695,7 @@ func (r *NodePoolReconciler) createNodeClaim(ctx context.Context, nodePool *clou
 	// The API server strips status on Create, so set the initial status via a
 	// separate status update.
 	nodeClaim.Status = cloudburstv1alpha1.NodeClaimStatus{
-		Phase:                cloudburstv1alpha1.NodeClaimPhasePending,
+		Phase:                 cloudburstv1alpha1.NodeClaimPhasePending,
 		RecommendationRequest: recReq,
 		Timestamps: cloudburstv1alpha1.NodeClaimTimestamps{
 			CreatedAt:      metav1.Now(),

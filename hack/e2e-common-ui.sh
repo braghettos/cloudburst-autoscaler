@@ -100,7 +100,7 @@ verify_ui_ready() {
         log_info "Verifying UI and API endpoints (http://127.0.0.1:8082)..."
         local base="http://127.0.0.1:8082"
         local failed=0
-        for path in "/" "/api/dashboard" "/api/pods" "/api/nodeclaims" "/api/nodepools" "/api/nodes" "/api/graph" "/api/logs/controller"; do
+        for path in "/" "/api/clusters" "/api/dashboard" "/api/pods" "/api/nodeclaims" "/api/nodepools" "/api/nodes" "/api/graph" "/api/logs/controller"; do
             local code
             code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "${base}${path}" 2>/dev/null || echo "000")
             if [ "$code" = "200" ]; then
