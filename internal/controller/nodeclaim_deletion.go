@@ -39,23 +39,39 @@ import (
 func (r *NodeClaimReconciler) handleDeleting(ctx context.Context, nodeClaim *cloudburstv1alpha1.NodeClaim, logger logr.Logger) (ctrl.Result, error) {
 	logger.Info("handling Deleting phase", "nodeClaim", nodeClaim.Name, "nodeName", nodeClaim.Status.NodeName)
 
+	// Track if the node was already gone (e.g. provider failure). When true, we proceed
+	// past instance deletion failure to unblock disaster recovery; the NodePool can
+	// create a replacement on another provider.
+	nodeGone := false
+
 	// Step 1: Cordon and drain node (if node exists)
 	if nodeClaim.Status.NodeName != "" {
-		drainStart := time.Now()
-		if err := r.cordonAndDrainNode(ctx, nodeClaim.Status.NodeName, logger); err != nil {
-			logger.Error(err, "failed to cordon and drain node")
-			metrics.DrainDurationSeconds.Observe(time.Since(drainStart).Seconds())
-			r.recordEvent(nodeClaim, corev1.EventTypeWarning, "DrainFailed", fmt.Sprintf("Failed to drain node: %v", err))
-			// Continue with deletion even if drain fails
+		node := &corev1.Node{}
+		if err := r.Get(ctx, types.NamespacedName{Name: nodeClaim.Status.NodeName}, node); err != nil {
+			if errors.IsNotFound(err) {
+				nodeGone = true
+				logger.Info("node already gone, skipping drain", "nodeName", nodeClaim.Status.NodeName)
+			} else {
+				logger.Error(err, "unable to get node for drain")
+				return ctrl.Result{}, err
+			}
 		} else {
-			metrics.DrainDurationSeconds.Observe(time.Since(drainStart).Seconds())
-			logger.Info("node cordoned and drained", "nodeName", nodeClaim.Status.NodeName)
-			r.recordEvent(nodeClaim, corev1.EventTypeNormal, "NodeDrained", fmt.Sprintf("Node %s drained successfully", nodeClaim.Status.NodeName))
+			drainStart := time.Now()
+			if err := r.cordonAndDrainNode(ctx, nodeClaim.Status.NodeName, logger); err != nil {
+				logger.Error(err, "failed to cordon and drain node")
+				metrics.DrainDurationSeconds.Observe(time.Since(drainStart).Seconds())
+				r.recordEvent(nodeClaim, corev1.EventTypeWarning, "DrainFailed", fmt.Sprintf("Failed to drain node: %v", err))
+				// Continue with deletion even if drain fails
+			} else {
+				metrics.DrainDurationSeconds.Observe(time.Since(drainStart).Seconds())
+				logger.Info("node cordoned and drained", "nodeName", nodeClaim.Status.NodeName)
+				r.recordEvent(nodeClaim, corev1.EventTypeNormal, "NodeDrained", fmt.Sprintf("Node %s drained successfully", nodeClaim.Status.NodeName))
+			}
 		}
 	}
 
 	// Step 2: Delete Kubernetes Node object
-	if nodeClaim.Status.NodeName != "" {
+	if nodeClaim.Status.NodeName != "" && !nodeGone {
 		node := &corev1.Node{}
 		if err := r.Get(ctx, types.NamespacedName{Name: nodeClaim.Status.NodeName}, node); err == nil {
 			if err := r.Delete(ctx, node); err != nil {
@@ -87,17 +103,27 @@ func (r *NodeClaimReconciler) handleDeleting(ctx context.Context, nodeClaim *clo
 				if err != nil {
 					logger.Error(err, "unable to create provisioner for deletion")
 					r.recordEvent(nodeClaim, corev1.EventTypeWarning, "ProvisionerError", fmt.Sprintf("Failed to create provisioner: %v", err))
-					return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+					if nodeGone {
+						logger.Info("node was gone, proceeding to remove NodeClaim despite provisioner error")
+					} else {
+						return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+					}
+				} else {
+					defer prov.Close()
+					if err := prov.DeleteInstance(ctx, nodeClaim.Status.InstanceID); err != nil {
+						metrics.ProviderErrorsTotal.WithLabelValues(provider, "delete").Inc()
+						logger.Error(err, "failed to delete instance", "instanceID", nodeClaim.Status.InstanceID)
+						r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InstanceDeletionFailed", fmt.Sprintf("Failed to delete instance: %v", err))
+						if nodeGone {
+							logger.Info("node was gone, proceeding to remove NodeClaim despite instance deletion failure (provider may be unreachable)")
+						} else {
+							return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+						}
+					} else {
+						logger.Info("deleted instance", "instanceID", nodeClaim.Status.InstanceID, "provider", provider)
+						r.recordEvent(nodeClaim, corev1.EventTypeNormal, "InstanceDeleted", fmt.Sprintf("Instance deleted: %s", nodeClaim.Status.InstanceID))
+					}
 				}
-				defer prov.Close()
-				if err := prov.DeleteInstance(ctx, nodeClaim.Status.InstanceID); err != nil {
-					metrics.ProviderErrorsTotal.WithLabelValues(provider, "delete").Inc()
-					logger.Error(err, "failed to delete instance", "instanceID", nodeClaim.Status.InstanceID)
-					r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InstanceDeletionFailed", fmt.Sprintf("Failed to delete instance: %v", err))
-					return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-				}
-				logger.Info("deleted instance", "instanceID", nodeClaim.Status.InstanceID, "provider", provider)
-				r.recordEvent(nodeClaim, corev1.EventTypeNormal, "InstanceDeleted", fmt.Sprintf("Instance deleted: %s", nodeClaim.Status.InstanceID))
 			}
 		}
 	}

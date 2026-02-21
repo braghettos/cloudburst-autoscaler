@@ -100,8 +100,7 @@ func (r *NodeClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	case cloudburstv1alpha1.NodeClaimPhaseJoining:
 		return r.handleJoining(ctx, nodeClaim, logger)
 	case cloudburstv1alpha1.NodeClaimPhaseReady:
-		// Already ready, no action needed
-		return ctrl.Result{}, nil
+		return r.handleReady(ctx, nodeClaim, logger)
 	case cloudburstv1alpha1.NodeClaimPhaseDeleting:
 		return r.handleDeleting(ctx, nodeClaim, logger)
 	case cloudburstv1alpha1.NodeClaimPhaseFailed:
@@ -661,6 +660,41 @@ func (r *NodeClaimReconciler) handleJoining(ctx context.Context, nodeClaim *clou
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// handleReady reconciles NodeClaims in Ready phase. It detects when the node has left
+// the cluster (e.g. provider failure, VM terminated) and initiates deletion so the
+// NodePool can create a replacement. Without this, a stale NodeClaim would block
+// scale-up indefinitely.
+func (r *NodeClaimReconciler) handleReady(ctx context.Context, nodeClaim *cloudburstv1alpha1.NodeClaim, logger logr.Logger) (ctrl.Result, error) {
+	if nodeClaim.Status.NodeName == "" {
+		return ctrl.Result{}, nil
+	}
+
+	node := &corev1.Node{}
+	if err := r.Get(ctx, types.NamespacedName{Name: nodeClaim.Status.NodeName}, node); err != nil {
+		if errors.IsNotFound(err) {
+			logger.Info("node no longer in cluster, initiating deletion",
+				"nodeName", nodeClaim.Status.NodeName,
+				"hint", "node may have left due to provider failure; NodeClaim will be cleaned up so NodePool can create a replacement",
+			)
+			r.recordEvent(nodeClaim, corev1.EventTypeWarning, "NodeLost", fmt.Sprintf("Node %s is no longer in cluster, cleaning up NodeClaim", nodeClaim.Status.NodeName))
+			provider := nodeClaim.Spec.Chosen.Provider
+			metrics.NodeClaimPhaseTransitionsTotal.WithLabelValues(provider, string(cloudburstv1alpha1.NodeClaimPhaseReady), string(cloudburstv1alpha1.NodeClaimPhaseDeleting)).Inc()
+			nodeClaim.Status.Phase = cloudburstv1alpha1.NodeClaimPhaseDeleting
+			nodeClaim.Status.Timestamps.LastTransition = metav1.Now()
+			if err := r.Status().Update(ctx, nodeClaim); err != nil {
+				logger.Error(err, "unable to update NodeClaim status")
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{Requeue: true}, nil
+		}
+		logger.Error(err, "unable to fetch node")
+		return ctrl.Result{}, err
+	}
+
+	// Requeue periodically so we can detect if the node leaves the cluster (e.g. provider failure)
+	return ctrl.Result{RequeueAfter: 60 * time.Second}, nil
 }
 
 // getTailscaleAuthKey returns an auth key for the NodeClaim. When EphemeralKeyFromAPI is set

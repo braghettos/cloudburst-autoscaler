@@ -91,7 +91,7 @@ Cloudburst is built for multi-cloud cost optimisation and cross-cloud burst. If 
 | **EU compliance with cost flexibility** | Run sensitive workloads in EU regions (Hetzner, Scaleway, OVH, GCP eu-west) while benefiting from cross-provider price comparison. |
 | **Dev/staging scale-to-zero** | Small base cluster; burst nodes only when devs run integration tests or staging deploys. Scale down to zero when idle. |
 | **Event-driven spikes** | Handle one-off spikes (product launches, campaigns, data migrations) without over-provisioning year-round. |
-| **Disaster recovery & failover** | When your primary cloud or region has an outage, update NodePool `allowedProviders` to exclude the affected provider; Cloudburst bursts to alternative clouds. See [docs/DISASTER_RECOVERY_USE_CASE.md](docs/DISASTER_RECOVERY_USE_CASE.md) and `./hack/simulate-disaster-recovery.sh`. |
+| **Disaster recovery & failover** | When a node leaves (provider failure), the controller cleans up the stale NodeClaim automatically. Optionally patch NodePool `allowedProviders` to steer failover to alternative clouds. See [docs/DISASTER_RECOVERY_USE_CASE.md](docs/DISASTER_RECOVERY_USE_CASE.md) and `./hack/simulate-disaster-recovery.sh`. |
 
 ## Features
 

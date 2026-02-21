@@ -3,13 +3,19 @@ set -euo pipefail
 
 # Disaster Recovery Use Case Simulation
 #
-# Simulates: primary cloud "outage" → policy update to exclude primary → new capacity
-# from fallback providers.
+# Simulates: primary cloud "outage" → policy update to exclude primary → node loss
+# → controller cleans up stale NodeClaim → new capacity from fallback providers.
 #
 # Flow:
 #   Phase 1: NodePool allows only PRIMARY. Create pod → provisions on primary.
-#   Phase 2: Patch NodePool to exclude primary, allow FALLBACK providers only.
-#   Phase 3: Create new pending pod → provisions on fallback (DR demonstrated).
+#   Phase 2: Patch NodePool to exclude primary, allow FALLBACK only. Delete the
+#            burst node (simulates provider failure). Controller detects node gone,
+#            cleans up NodeClaim automatically.
+#   Phase 3: New pending pod → provisions on fallback (DR demonstrated).
+#
+# The controller now reconciles NodeClaims when their node leaves the cluster
+# (handleReady detects node NotFound, transitions to Deleting). No manual
+# NodeClaim deletion required.
 #
 # Prerequisites:
 #   - Kind cluster with Cloudburst controller running
@@ -399,9 +405,9 @@ EOF
 }
 
 phase2_simulate_outage() {
-    log_phase "Phase 2: Simulate outage - patch NodePool to exclude primary, allow fallbacks"
+    log_phase "Phase 2: Simulate outage - patch NodePool, delete node"
 
-    # Build JSON array for fallback providers
+    # 1. Patch NodePool to exclude primary, allow fallbacks only
     local fallback_json="["
     local first=1
     for p in "${FALLBACK_PROVIDERS_ARR[@]}"; do
@@ -413,15 +419,47 @@ phase2_simulate_outage() {
 
     kubectl patch nodepool "${NODEPOOL_NAME}" -n "${TEST_NAMESPACE}" --type=merge -p "{\"spec\":{\"requirements\":{\"allowedProviders\":${fallback_json}}}}"
     log_info "✓ NodePool now allows only: ${FALLBACK_PROVIDERS_STR} (primary ${PRIMARY_PROVIDER} excluded)"
+
+    # 2. Get burst node name from pod, delete pod and node (simulate provider failure)
+    local node_name
+    node_name=$(kubectl get pod "${POD_PRIMARY}" -n "${TEST_NAMESPACE}" -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)
+    if [ -z "${node_name}" ]; then
+        log_error "Could not get node name from pod ${POD_PRIMARY}"
+        exit 1
+    fi
+    log_info "Deleting pod ${POD_PRIMARY} and node ${node_name} (simulates provider outage)..."
+    kubectl delete pod "${POD_PRIMARY}" -n "${TEST_NAMESPACE}" --ignore-not-found --wait=false 2>/dev/null || true
+    kubectl delete node "${node_name}" 2>/dev/null || true
+
+    # 3. Wait for controller to detect node gone and clean up NodeClaim (handleReady → Deleting → delete CR)
+    log_info "Waiting for controller to clean up NodeClaim (node-loss reconciliation)..."
+    wait_for_nodeclaim_cleanup
+    log_info "✓ NodeClaim cleaned up"
+}
+
+wait_for_nodeclaim_cleanup() {
+    local timeout=${READY_TIMEOUT}
+    local elapsed=0
+
+    while [ $elapsed -lt $timeout ]; do
+        local count
+        count=$(kubectl get nodeclaims -n "${TEST_NAMESPACE}" -l "cloudburst.io/nodepool=${NODEPOOL_NAME}" --no-headers 2>/dev/null | wc -l)
+        if [ "${count}" -eq 0 ]; then
+            return 0
+        fi
+        sleep 10
+        elapsed=$((elapsed + 10))
+    done
+
+    log_error "Timeout waiting for NodeClaim cleanup"
+    kubectl get nodeclaims -n "${TEST_NAMESPACE}"
+    exit 1
 }
 
 phase3_failover() {
     log_phase "Phase 3: Failover - new pod triggers provisioning on fallback"
 
-    # Delete the primary pod so a new one can be created (or create a second one - both show DR)
-    kubectl delete pod "${POD_PRIMARY}" -n "${TEST_NAMESPACE}" --ignore-not-found --wait=false 2>/dev/null || true
-    sleep 5
-
+    # Primary pod was deleted in Phase 2. Create failover pod; it will trigger new NodeClaim.
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Pod
