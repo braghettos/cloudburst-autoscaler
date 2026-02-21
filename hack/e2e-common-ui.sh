@@ -42,10 +42,23 @@ deploy_ui() {
     # Create temp kubeconfig with host.docker.internal so container can reach Kind API
     UI_KUBECONFIG_TMP="/tmp/cloudburst-ui-kubeconfig-$$.config"
     export UI_KUBECONFIG_TMP
+
+    # Ensure we export the Kind context (cluster ID = kind-${KIND_CLUSTER_NAME})
+    local kind_ctx="kind-${KIND_CLUSTER_NAME:-cloudburst}"
+    if ! kubectl config use-context "${kind_ctx}" 2>/dev/null; then
+        log_error "Context ${kind_ctx} not found. Run: kubectl config get-contexts"
+        return 1
+    fi
+
     kubectl config view --minify --raw > "${UI_KUBECONFIG_TMP}" 2>/dev/null || {
         log_error "Failed to export kubeconfig"
         return 1
     }
+    if ! grep -q "${kind_ctx}" "${UI_KUBECONFIG_TMP}" 2>/dev/null; then
+        log_error "Exported kubeconfig missing context ${kind_ctx}"
+        return 1
+    fi
+    chmod 644 "${UI_KUBECONFIG_TMP}" 2>/dev/null || true
     if [[ "$(uname -s)" == "Darwin" ]]; then
         sed -i '' 's|127\.0\.0\.1|host.docker.internal|g' "${UI_KUBECONFIG_TMP}" 2>/dev/null || true
     else
@@ -95,12 +108,14 @@ verify_ui_ready() {
         return 0
     fi
 
-    # Verify UI and all exposed APIs respond with 200 (container exposes 8082)
+    # Verify UI and fleet API endpoints (container exposes 8082)
     if command -v curl &>/dev/null; then
         log_info "Verifying UI and API endpoints (http://127.0.0.1:8082)..."
         local base="http://127.0.0.1:8082"
         local failed=0
-        for path in "/" "/api/clusters" "/api/dashboard" "/api/pods" "/api/nodeclaims" "/api/nodepools" "/api/nodes" "/api/graph" "/api/logs/controller"; do
+
+        # SPA and fleet list
+        for path in "/" "/api/clusters"; do
             local code
             code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "${base}${path}" 2>/dev/null || echo "000")
             if [ "$code" = "200" ]; then
@@ -110,6 +125,25 @@ verify_ui_ready() {
                 failed=$((failed + 1))
             fi
         done
+
+        # Scoped APIs: need cluster ID from /api/clusters
+        local cluster_id
+        cluster_id=$(curl -s --connect-timeout 5 "${base}/api/clusters" 2>/dev/null | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+        if [ -n "${cluster_id}" ]; then
+            for path in "/api/clusters/${cluster_id}/dashboard" "/api/clusters/${cluster_id}/pods" "/api/clusters/${cluster_id}/nodeclaims" "/api/clusters/${cluster_id}/nodepools" "/api/clusters/${cluster_id}/nodes" "/api/clusters/${cluster_id}/graph" "/api/clusters/${cluster_id}/logs/controller"; do
+                local code
+                code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "${base}${path}" 2>/dev/null || echo "000")
+                if [ "$code" = "200" ]; then
+                    log_info "✓ ${path} -> 200"
+                else
+                    log_error "${path} -> ${code} (expected 200)"
+                    failed=$((failed + 1))
+                fi
+            done
+        else
+            log_warn "No cluster from /api/clusters, skipping scoped API checks"
+        fi
+
         if [ $failed -gt 0 ]; then
             log_error "UI API verification failed: ${failed} endpoint(s) did not return 200"
             return 1

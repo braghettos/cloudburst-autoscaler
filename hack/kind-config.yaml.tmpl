@@ -25,6 +25,7 @@ nodes:
       - "${HOST_TS_IP}"
       - "localhost"
       - "127.0.0.1"
+      - "host.docker.internal"
   # Do NOT add extraPortMappings for 6443: networking.apiServerPort already exposes it.
   # Duplicate mapping caused: "failed to bind host port 6443: address already in use"
 - role: worker

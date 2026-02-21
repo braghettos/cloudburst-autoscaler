@@ -1,156 +1,96 @@
 # Multi-Provider Testing Guide
 
-This guide explains how to test Cloudburst Autoscaler with pods provisioned on both GCP and Scaleway simultaneously.
+This guide explains how to test Cloudburst Autoscaler with pods provisioned from multiple cloud providers simultaneously in a single Kind cluster.
 
 ## Overview
 
-The test script `test-multi-provider.sh` demonstrates provisioning nodes from multiple cloud providers by:
+The test script `integration-test-e2e-all-providers.sh` runs a full E2E flow that:
 
-1. Creating separate NodePools for GCP and Scaleway
-2. Creating corresponding NodeClasses for each provider
-3. Creating pods with node selectors that target specific providers
-4. Verifying that nodes are provisioned from both providers
+1. Stops CloudBroker, deletes any existing Kind cluster
+2. Starts CloudBroker, runs migrations, ingests all providers
+3. Creates a Kind cluster, installs CRDs, builds and loads the controller
+4. Deploys the controller with **all enabled provider credentials** from `.env`
+5. Creates one NodeClass (with configs for all enabled providers), Tailscale secret
+6. For each enabled provider: creates NodePool + pending pod
+7. Waits for all NodeClaims Ready and all pods Running
+8. Optionally deletes pods and waits for scale-down (default: yes, use `--no-scale-down` to skip)
+
+Providers are auto-detected from environment variables. Set credentials in `.env` for each provider you want to test.
 
 ## Prerequisites
 
-### GCP Setup
-- `GCP_PROJECT` environment variable
-- `GOOGLE_APPLICATION_CREDENTIALS` pointing to a service account key file
-- `GCP_ZONE` (default: `us-central1-a`)
+### Per-provider credentials
 
-### Scaleway Setup
-- `SCW_SECRET_KEY` environment variable (or configure via Kubernetes secret)
-- `SCW_DEFAULT_ZONE` (optional, default: `fr-par-1`)
+| Provider   | Required env vars |
+|-----------|-------------------|
+| GCP       | `GOOGLE_APPLICATION_CREDENTIALS`, `GCP_PROJECT` |
+| Scaleway  | `SCW_SECRET_KEY` |
+| Hetzner   | `HETZNER_API_TOKEN` |
+| DigitalOcean | `DIGITALOCEAN_API_TOKEN` |
+| OVH       | `OVH_APPLICATION_KEY`, `OVH_APPLICATION_SECRET`, `OVH_CONSUMER_KEY`, `OVH_PROJECT_ID` |
+| AWS       | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (and `AWS_AMI` or AWS CLI for auto-resolve) |
+| Azure     | `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, `AZURE_SUBNET_ID` |
 
-### Common Setup
+### Common
+
 - `TAILSCALE_AUTHKEY` for VPN connectivity
 - Tailscale running and connected
-- Docker, Kind, and kubectl installed
-- CloudBroker service running (defaults to `http://<host-ip>:8000`)
-
-## How It Works
-
-### NodePool Selection
-
-Each NodePool specifies `allowedProviders` to restrict which cloud providers can be used:
-
-- **GCP NodePool**: `allowedProviders: ["gcp"]` → CloudBroker returns GCP recommendations
-- **Scaleway NodePool**: `allowedProviders: ["scaleway"]` → CloudBroker returns Scaleway recommendations
-
-### NodeClass Matching
-
-**✅ Implemented**: The controller now automatically matches NodeClass based on the provider from CloudBroker recommendation:
-
-1. **Automatic Matching**: When creating NodeClaims, the controller:
-   - Gets CloudBroker recommendation first (which includes the provider)
-   - Filters available NodeClasses to find one that supports the recommended provider
-   - Uses the matching NodeClass for NodeClaim creation
-
-2. **Provider Support Detection**:
-   - **GCP**: NodeClass must have `spec.gcp.project` and `spec.gcp.zone` set
-   - **Scaleway**: NodeClass must have `spec.scaleway` configured with `zone` set
-
-3. **Fallback**: If no matching NodeClass is found, the controller logs an error and creates an event, preventing incorrect NodeClaim creation
-
-### Pod Scheduling
-
-Pods use node selectors to target specific providers:
-
-```yaml
-affinity:
-  nodeAffinity:
-    requiredDuringSchedulingIgnoredDuringExecution:
-      nodeSelectorTerms:
-      - matchExpressions:
-        - key: cloudburst.io/provider
-          operator: In
-          values: ["gcp"]  # or ["scaleway"]
-```
+- Docker, Kind, kubectl installed
+- CloudBroker cloned and configurable (defaults to `../cloudbroker`)
 
 ## Running the Test
 
 ```bash
-# Set required environment variables
-export GCP_PROJECT="your-project"
-export GOOGLE_APPLICATION_CREDENTIALS="/path/to/gcp-key.json"
-export GCP_ZONE="us-central1-a"
-export SCW_SECRET_KEY="your-scaleway-secret-key"
-export SCW_DEFAULT_ZONE="fr-par-1"  # optional
-export TAILSCALE_AUTHKEY="your-tailscale-key"
+# Set required environment variables in .env (at least one provider + TAILSCALE_AUTHKEY)
+cp .env.example .env
+# Edit .env with your credentials
 
-# Run the test
-./hack/test-multi-provider.sh
+# Run the test (tests all providers with credentials in .env)
+./hack/integration-test-e2e-all-providers.sh
+
+# Skip scale-down phase
+./hack/integration-test-e2e-all-providers.sh --no-scale-down
+
+# Custom CloudBroker directory
+./hack/integration-test-e2e-all-providers.sh --cloudbroker-dir /path/to/cloudbroker
 ```
 
-## Expected Behavior
+## How It Works
 
-1. **GCP Pod** (`gcp-workload-pod`):
-   - Becomes unschedulable (no GCP nodes exist)
-   - Triggers GCP NodePool controller
-   - CloudBroker returns GCP recommendation
-   - GCP NodeClaim created → GCP VM provisioned
-   - Pod scheduled on GCP node
+### NodePool per provider
 
-2. **Scaleway Pod** (`scaleway-workload-pod`):
-   - Becomes unschedulable (no Scaleway nodes exist)
-   - Triggers Scaleway NodePool controller
-   - CloudBroker returns Scaleway recommendation
-   - Scaleway NodeClaim created → Scaleway server provisioned
-   - Pod scheduled on Scaleway node
+For each enabled provider, the script creates:
 
-3. **Verification**:
-   - Both pods scheduled successfully
-   - Nodes from both providers visible in cluster
-   - Node labels show `cloudburst.io/provider=gcp` and `cloudburst.io/provider=scaleway`
+- A NodePool with `allowedProviders: ["<provider>"]`
+- A pod with `nodeSelector.cloudburst.io/nodepool: e2e-<provider>-nodepool`
+
+The controller creates NodeClaims when pods are pending; CloudBroker returns recommendations, and the controller picks the matching NodeClass (single NodeClass has configs for all providers).
+
+### Single NodeClass
+
+One NodeClass is created with provider configs for all enabled providers. The controller matches the recommended provider from CloudBroker to the corresponding NodeClass spec (gcp, scaleway, hetzner, etc.).
+
+## Alternative: Per-provider E2E scripts
+
+For testing a single provider at a time:
+
+- `./hack/integration-test-e2e.sh` — GCP only
+- `./hack/integration-test-e2e-hetzner.sh`
+- `./hack/integration-test-e2e-scaleway.sh`
+- `./hack/integration-test-e2e-digitalocean.sh`
+- `./hack/integration-test-e2e-ovh.sh`
+- `./hack/integration-test-e2e-aws.sh`
+- `./hack/integration-test-e2e-azure.sh`
+
+Or run all per-provider tests sequentially:
+
+```bash
+./hack/run-all-e2e.sh
+```
 
 ## Troubleshooting
 
-### NodeClass Mismatch
-
-If you see errors like "missing GCP configuration" when provisioning Scaleway (or vice versa):
-
-- **Cause**: Controller selected wrong NodeClass
-- **Solution**: Use separate namespaces or ensure only matching NodeClass exists
-
-### CloudBroker Not Returning Expected Provider
-
-- Verify `allowedProviders` in NodePool matches desired provider
-- Check CloudBroker logs to see what recommendations are returned
-- Ensure CloudBroker supports both providers
-
-### Pods Not Scheduling
-
-- Check node labels: `kubectl get nodes --show-labels`
-- Verify pod node selectors match node labels
-- Check pod events: `kubectl describe pod <pod-name>`
-
-## Future Improvements
-
-1. **NodePool-NodeClass Binding**: Add explicit `nodeClassRef` to NodePool spec for explicit binding
-2. **Provider Priority**: Support multiple NodeClasses per provider with priority/weight
-3. **NodeClass Validation**: Add webhook validation to ensure NodeClass has at least one provider configured
-
-## Example Output
-
-```
-[INFO] === Multi-Provider Test ===
-[PROVIDER] Creating GCP NodeClass...
-[PROVIDER] ✓ GCP NodeClass created
-[PROVIDER] Creating GCP NodePool...
-[PROVIDER] ✓ GCP NodePool created
-[PROVIDER] Creating Scaleway NodeClass...
-[PROVIDER] ✓ Scaleway NodeClass created
-[PROVIDER] Creating Scaleway NodePool...
-[PROVIDER] ✓ Scaleway NodePool created
-[PROVIDER] Waiting for GCP NodeClaim to be created...
-[PROVIDER] ✓ GCP NodeClaim created: cb-gcp-nodepool-abc123
-[PROVIDER] Waiting for Scaleway NodeClaim to be created...
-[PROVIDER] ✓ Scaleway NodeClaim created: cb-scaleway-nodepool-xyz789
-[PROVIDER] Waiting for GCP pod 'gcp-workload-pod' to be scheduled...
-[PROVIDER] ✓ GCP pod scheduled on node: cb-gcp-nodepool-abc123
-[PROVIDER] Waiting for Scaleway pod 'scaleway-workload-pod' to be scheduled...
-[PROVIDER] ✓ Scaleway pod scheduled on node: cb-scaleway-nodepool-xyz789
-[INFO] GCP nodes: 1
-[INFO] Scaleway nodes: 1
-[INFO] ✓ Both providers have nodes!
-```
+- **No provider credentials set**: Ensure at least one provider’s env vars are set in `.env`
+- **TAILSCALE_AUTHKEY not set**: Required for node join; add to `.env`
+- **CloudBroker not healthy**: Ensure `../cloudbroker` (or `CLOUDBROKER_DIR`) is correct and `make migrate` + `make ingest-all` succeed
+- **Timeout waiting for NodeClaims**: Check controller logs: `kubectl logs -n cloudburst-system -l app=cloudburst-controller --tail=80`

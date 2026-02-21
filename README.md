@@ -91,6 +91,7 @@ Cloudburst is built for multi-cloud cost optimisation and cross-cloud burst. If 
 | **EU compliance with cost flexibility** | Run sensitive workloads in EU regions (Hetzner, Scaleway, OVH, GCP eu-west) while benefiting from cross-provider price comparison. |
 | **Dev/staging scale-to-zero** | Small base cluster; burst nodes only when devs run integration tests or staging deploys. Scale down to zero when idle. |
 | **Event-driven spikes** | Handle one-off spikes (product launches, campaigns, data migrations) without over-provisioning year-round. |
+| **Disaster recovery & failover** | When your primary cloud or region has an outage, update NodePool `allowedProviders` to exclude the affected provider; Cloudburst bursts to alternative clouds. See [docs/DISASTER_RECOVERY_USE_CASE.md](docs/DISASTER_RECOVERY_USE_CASE.md) and `./hack/simulate-disaster-recovery.sh`. |
 
 ## Features
 
@@ -232,14 +233,8 @@ Or from the UI repo: `cd ../cloudburst-autoscaler-ui && make run`. For in-cluste
 ./hack/integration-test-e2e-aws.sh
 ./hack/integration-test-e2e-azure.sh
 
-# All-providers: detect enabled providers from env and list per-provider scripts
+# All-providers: full E2E in one Kind cluster with all enabled providers from .env
 ./hack/integration-test-e2e-all-providers.sh
-
-# Multi-provider test (GCP + Scaleway)
-./hack/test-multi-provider.sh
-
-# NodeClaim lifecycle test (manual NodeClaim creation)
-./hack/integration-test.sh
 ```
 
 ## Project Structure
@@ -276,16 +271,15 @@ Or from the UI repo: `cd ../cloudburst-autoscaler-ui && make run`. For in-cluste
 │   └── samples/                     # Example CRs
 ├── hack/                            # Development and test scripts
 │   ├── create-kind.sh               # Create local Kind cluster
-│   ├── integration-test.sh          # NodeClaim lifecycle test
-│   ├── integration-test-e2e.sh           # Full E2E test (GCP)
+│   ├── integration-test-e2e.sh           # E2E test (GCP)
 │   ├── integration-test-e2e-hetzner.sh   # E2E test (Hetzner)
 │   ├── integration-test-e2e-digitalocean.sh  # E2E test (DigitalOcean)
 │   ├── integration-test-e2e-ovh.sh       # E2E test (OVH)
 │   ├── integration-test-e2e-scaleway.sh  # E2E test (Scaleway)
 │   ├── integration-test-e2e-aws.sh       # E2E test (AWS EC2)
 │   ├── integration-test-e2e-azure.sh     # E2E test (Azure VM)
-│   ├── integration-test-e2e-all-providers.sh  # Detect enabled providers, list E2E scripts
-│   └── test-multi-provider.sh            # Multi-provider test (GCP + Scaleway)
+│   ├── integration-test-e2e-all-providers.sh  # Full E2E with all enabled providers
+│   └── run-all-e2e.sh               # Run per-provider E2E tests sequentially
 └── docs/                            # Additional documentation
 ```
 
