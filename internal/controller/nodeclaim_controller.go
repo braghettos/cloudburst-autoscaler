@@ -664,8 +664,10 @@ func (r *NodeClaimReconciler) handleJoining(ctx context.Context, nodeClaim *clou
 
 // handleReady reconciles NodeClaims in Ready phase. It detects when the node has left
 // the cluster (e.g. provider failure, VM terminated) and initiates deletion so the
-// NodePool can create a replacement. Without this, a stale NodeClaim would block
-// scale-up indefinitely.
+// NodePool can create a replacement. Triggers transition to Deleting when: (1) node
+// is NotFound, or (2) node exists but NodeReady is False for longer than
+// NodeUnreachableGracePeriod (VM gone, kubelet stopped; node stays NotReady until
+// something removes it). Configurable via CLOUDBURST_NODE_UNREACHABLE_GRACE_PERIOD.
 func (r *NodeClaimReconciler) handleReady(ctx context.Context, nodeClaim *cloudburstv1alpha1.NodeClaim, logger logr.Logger) (ctrl.Result, error) {
 	if nodeClaim.Status.NodeName == "" {
 		return ctrl.Result{}, nil
@@ -693,8 +695,42 @@ func (r *NodeClaimReconciler) handleReady(ctx context.Context, nodeClaim *cloudb
 		return ctrl.Result{}, err
 	}
 
-	// Requeue periodically so we can detect if the node leaves the cluster (e.g. provider failure)
-	return ctrl.Result{RequeueAfter: 60 * time.Second}, nil
+	// Node exists. Check if it has been NotReady for too long (e.g. VM deleted, kubelet stopped).
+	if r.Config != nil && r.Config.NodeUnreachableGracePeriod > 0 {
+		for _, c := range node.Status.Conditions {
+			if c.Type == corev1.NodeReady && c.Status != corev1.ConditionTrue {
+				unreachableDuration := time.Since(c.LastTransitionTime.Time)
+				if unreachableDuration >= r.Config.NodeUnreachableGracePeriod {
+					logger.Info("node unreachable beyond grace period, initiating deletion",
+						"nodeName", node.Name,
+						"reason", c.Reason,
+						"unreachableDuration", unreachableDuration.String(),
+						"gracePeriod", r.Config.NodeUnreachableGracePeriod.String(),
+					)
+					return r.transitionToDeletingNodeLost(ctx, nodeClaim, logger,
+						fmt.Sprintf("Node %s unreachable for %v (VM may be gone)", node.Name, unreachableDuration))
+				}
+				break
+			}
+		}
+	}
+
+	// Requeue periodically so we can detect if the node leaves or becomes unreachable
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+}
+
+func (r *NodeClaimReconciler) transitionToDeletingNodeLost(ctx context.Context, nodeClaim *cloudburstv1alpha1.NodeClaim, logger logr.Logger, hint string) (ctrl.Result, error) {
+	logger.Info("initiating deletion", "hint", hint)
+	r.recordEvent(nodeClaim, corev1.EventTypeWarning, "NodeLost", fmt.Sprintf("Node lost; cleaning up NodeClaim: %s", hint))
+	provider := nodeClaim.Spec.Chosen.Provider
+	metrics.NodeClaimPhaseTransitionsTotal.WithLabelValues(provider, string(nodeClaim.Status.Phase), string(cloudburstv1alpha1.NodeClaimPhaseDeleting)).Inc()
+	nodeClaim.Status.Phase = cloudburstv1alpha1.NodeClaimPhaseDeleting
+	nodeClaim.Status.Timestamps.LastTransition = metav1.Now()
+	if err := r.Status().Update(ctx, nodeClaim); err != nil {
+		logger.Error(err, "unable to update NodeClaim status")
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{Requeue: true}, nil
 }
 
 // getTailscaleAuthKey returns an auth key for the NodeClaim. When EphemeralKeyFromAPI is set

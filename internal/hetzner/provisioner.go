@@ -18,7 +18,10 @@ package hetzner
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -45,12 +48,19 @@ type Provisioner struct {
 
 // NewProvisioner creates a new Hetzner Cloud provisioner.
 // apiToken is the Hetzner Cloud API token, location is the datacenter location (e.g. "fsn1").
+// When HETZNER_INSECURE_SKIP_VERIFY is set (e.g. for in-cluster mock with hostAliases),
+// TLS verification is skipped so a self-signed mock cert is accepted.
 func NewProvisioner(ctx context.Context, apiToken, location string) (*Provisioner, error) {
 	if apiToken == "" {
 		return nil, fmt.Errorf("Hetzner API token is required")
 	}
 
-	client := hcloud.NewClient(hcloud.WithToken(apiToken))
+	opts := []hcloud.ClientOption{hcloud.WithToken(apiToken)}
+	if os.Getenv("HETZNER_INSECURE_SKIP_VERIFY") == "true" {
+		transport := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+		opts = append(opts, hcloud.WithHTTPClient(&http.Client{Transport: transport}))
+	}
+	client := hcloud.NewClient(opts...)
 
 	return &Provisioner{
 		client:   client,
@@ -163,7 +173,8 @@ func (p *Provisioner) DeleteInstance(ctx context.Context, instanceID string) err
 	return fmt.Errorf("failed after %d attempts: %w", MaxRetries+1, lastErr)
 }
 
-// deleteInstanceOnce makes a single attempt to delete a server
+// deleteInstanceOnce makes a single attempt to delete a server.
+// If the server is already gone (404/not found), treat as success (idempotent).
 func (p *Provisioner) deleteInstanceOnce(ctx context.Context, instanceID string) error {
 	_, serverID, err := parseInstanceID(instanceID)
 	if err != nil {
@@ -173,6 +184,10 @@ func (p *Provisioner) deleteInstanceOnce(ctx context.Context, instanceID string)
 	server := &hcloud.Server{ID: serverID}
 	result, _, err := p.client.Server.DeleteWithResult(ctx, server)
 	if err != nil {
+		// If the server is already gone (404), treat as success
+		if strings.Contains(strings.ToLower(err.Error()), "not found") || strings.Contains(err.Error(), "404") {
+			return nil
+		}
 		return fmt.Errorf("failed to delete server: %w", err)
 	}
 

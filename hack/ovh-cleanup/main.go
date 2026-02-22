@@ -25,6 +25,7 @@ import (
 
 func main() {
 	verify := flag.String("verify", "", "Instance ID to verify is deleted (ovh/projectId/instanceId)")
+	listOnly := flag.Bool("list", false, "List all instances (don't delete)")
 	flag.Parse()
 
 	appKey := os.Getenv("OVH_APPLICATION_KEY")
@@ -64,6 +65,15 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to list instances: %v\n", err)
 		os.Exit(1)
+	}
+
+	if *listOnly {
+		fmt.Printf("Found %d instance(s) in OVH project %s:\n", len(instances), projectID)
+		for _, inst := range instances {
+			fmt.Printf("  - %s (id=%s, status=%s, region=%s) cb-prefix=%v\n",
+				inst.Name, inst.ID, inst.Status, inst.Region, strings.HasPrefix(inst.Name, "cb-"))
+		}
+		return
 	}
 
 	var deleted int
