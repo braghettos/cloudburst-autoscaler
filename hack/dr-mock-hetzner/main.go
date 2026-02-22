@@ -25,7 +25,7 @@ import (
 
 const (
 	defaultListen = ":8089"
-	realAPI      = "https://api.hetzner.cloud"
+	realAPI       = "https://api.hetzner.cloud"
 	// deleteErrorsBeforeSuccess is how many 503s to return before 404 on DELETE
 	deleteErrorsBeforeSuccess = 3
 )
@@ -97,9 +97,9 @@ func generateSelfSignedCert() (tls.Certificate, error) {
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: "api.hetzner.cloud"},
-		NotBefore:   time.Now(),
-		NotAfter:    time.Now().Add(24 * time.Hour),
-		DNSNames:    []string{"api.hetzner.cloud"},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		DNSNames:     []string{"api.hetzner.cloud"},
 	}
 	certDER, _ := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 	keyBytes, _ := x509.MarshalECPrivateKey(key)

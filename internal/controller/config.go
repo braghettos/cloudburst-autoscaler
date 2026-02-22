@@ -23,34 +23,34 @@ import (
 
 // ControllerConfig holds controller timeouts and intervals loaded from environment.
 type ControllerConfig struct {
-	ProvisioningTimeout       time.Duration
-	JoiningTimeout            time.Duration
-	RequeueInterval           time.Duration
-	DrainTimeout              time.Duration
-	DrainGracePeriod          time.Duration
-	DrainPollInterval         time.Duration
+	ProvisioningTimeout        time.Duration
+	JoiningTimeout             time.Duration
+	RequeueInterval            time.Duration
+	DrainTimeout               time.Duration
+	DrainGracePeriod           time.Duration
+	DrainPollInterval          time.Duration
 	NodeUnreachableGracePeriod time.Duration
 }
 
 const (
-	defaultProvisioningTimeout       = 10 * time.Minute
-	defaultJoiningTimeout            = 20 * time.Minute
-	defaultRequeueInterval           = 30 * time.Second
-	defaultDrainTimeout              = 5 * time.Minute
-	defaultDrainGracePeriod          = 30 * time.Second
-	defaultDrainPollInterval         = 2 * time.Second
+	defaultProvisioningTimeout        = 10 * time.Minute
+	defaultJoiningTimeout             = 20 * time.Minute
+	defaultRequeueInterval            = 30 * time.Second
+	defaultDrainTimeout               = 5 * time.Minute
+	defaultDrainGracePeriod           = 30 * time.Second
+	defaultDrainPollInterval          = 2 * time.Second
 	defaultNodeUnreachableGracePeriod = 2 * time.Minute
 )
 
 // LoadConfig reads controller configuration from environment variables with fallback to defaults.
 func LoadConfig() *ControllerConfig {
 	return &ControllerConfig{
-		ProvisioningTimeout:       durationFromEnv("CLOUDBURST_PROVISIONING_TIMEOUT", defaultProvisioningTimeout),
-		JoiningTimeout:            durationFromEnv("CLOUDBURST_JOINING_TIMEOUT", defaultJoiningTimeout),
-		RequeueInterval:           durationFromEnv("CLOUDBURST_REQUEUE_INTERVAL", defaultRequeueInterval),
-		DrainTimeout:              durationFromEnv("CLOUDBURST_DRAIN_TIMEOUT", defaultDrainTimeout),
-		DrainGracePeriod:          durationFromEnv("CLOUDBURST_DRAIN_GRACE_PERIOD", defaultDrainGracePeriod),
-		DrainPollInterval:         durationFromEnv("CLOUDBURST_DRAIN_POLL_INTERVAL", defaultDrainPollInterval),
+		ProvisioningTimeout:        durationFromEnv("CLOUDBURST_PROVISIONING_TIMEOUT", defaultProvisioningTimeout),
+		JoiningTimeout:             durationFromEnv("CLOUDBURST_JOINING_TIMEOUT", defaultJoiningTimeout),
+		RequeueInterval:            durationFromEnv("CLOUDBURST_REQUEUE_INTERVAL", defaultRequeueInterval),
+		DrainTimeout:               durationFromEnv("CLOUDBURST_DRAIN_TIMEOUT", defaultDrainTimeout),
+		DrainGracePeriod:           durationFromEnv("CLOUDBURST_DRAIN_GRACE_PERIOD", defaultDrainGracePeriod),
+		DrainPollInterval:          durationFromEnv("CLOUDBURST_DRAIN_POLL_INTERVAL", defaultDrainPollInterval),
 		NodeUnreachableGracePeriod: durationFromEnv("CLOUDBURST_NODE_UNREACHABLE_GRACE_PERIOD", defaultNodeUnreachableGracePeriod),
 	}
 }
