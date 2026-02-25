@@ -484,6 +484,11 @@ func (r *NodePoolReconciler) calculateDesiredCapacity(ctx context.Context) (plan
 // patchPodsWithProviderAffinity patches eligible unschedulable pods that have no
 // cloudburst.io/provider or cloudburst.io/nodepool constraint, adding nodeAffinity
 // for the chosen provider so they land on the node being provisioned.
+//
+// Note: Kubernetes forbids changing spec.affinity on existing pods (only a limited
+// set of spec fields are mutable). Adding affinity to a pod with nil Affinity will
+// fail. We skip such pods to avoid error log spam; the NodeClaim is still created
+// and the scheduler may place the pod on the new node via other constraints.
 func (r *NodePoolReconciler) patchPodsWithProviderAffinity(ctx context.Context, provider string, logger logr.Logger) error {
 	podList := &corev1.PodList{}
 	if err := r.List(ctx, podList); err != nil {
@@ -505,6 +510,11 @@ func (r *NodePoolReconciler) patchPodsWithProviderAffinity(ctx context.Context, 
 			continue
 		}
 		if planner.PodHasProviderOrNodePoolConstraint(latest) {
+			continue
+		}
+
+		// Skip pods with nil Affinity: K8s forbids changing spec.affinity on existing pods.
+		if latest.Spec.Affinity == nil {
 			continue
 		}
 
