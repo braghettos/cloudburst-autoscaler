@@ -13,7 +13,7 @@ The test script `integration-test-e2e-all-providers.sh` runs a full E2E flow tha
 5. Creates one NodeClass (with configs for all enabled providers), Tailscale secret
 6. For each enabled provider: creates NodePool + pending pod
 7. Waits for all NodeClaims Ready and all pods Running
-8. Optionally deletes pods and waits for scale-down (default: yes, use `--no-scale-down` to skip)
+8. Deletes pods and waits for scale-down (mandatory)
 
 Providers are auto-detected from environment variables. Set credentials in `.env` for each provider you want to test.
 
@@ -49,7 +49,7 @@ cp .env.example .env
 ./hack/integration-test-e2e-all-providers.sh
 
 # Skip scale-down phase
-./hack/integration-test-e2e-all-providers.sh --no-scale-down
+./hack/integration-test-e2e-all-providers.sh
 
 # Custom CloudBroker directory
 ./hack/integration-test-e2e-all-providers.sh --cloudbroker-dir /path/to/cloudbroker
@@ -74,7 +74,7 @@ One NodeClass is created with provider configs for all enabled providers. The co
 
 For testing a single provider at a time:
 
-- `./hack/integration-test-e2e.sh` — GCP only
+- `./hack/integration-test-e2e-gcp.sh` — GCP only
 - `./hack/integration-test-e2e-hetzner.sh`
 - `./hack/integration-test-e2e-scaleway.sh`
 - `./hack/integration-test-e2e-digitalocean.sh`

@@ -118,7 +118,7 @@ fi
 
 # 6. GCP
 if [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ] && [ -f "${GOOGLE_APPLICATION_CREDENTIALS:-/nonexistent}" ] && [ -n "${GCP_PROJECT:-}" ]; then
-    run_test "gcp" "${SCRIPT_DIR}/integration-test-e2e.sh"
+    run_test "gcp" "${SCRIPT_DIR}/integration-test-e2e-gcp.sh"
 else
     echo -e "${YELLOW}[SKIP] GCP: GOOGLE_APPLICATION_CREDENTIALS or GCP_PROJECT not set${NC}"
     PROVIDERS_SKIP=$((PROVIDERS_SKIP + 1))

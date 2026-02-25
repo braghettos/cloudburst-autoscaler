@@ -12,7 +12,8 @@ set -euo pipefail
 # 6. Deploy UI (http://127.0.0.1:8082)
 # 7. For each enabled provider: create NodePool + pending pod
 # 8. Wait for all NodeClaims Ready and all pods Running
-# 9. Optionally: delete pods, wait for scale-down (--scale-down)
+# 9. Run Playwright UI assertions (per enabled provider)
+# 10. Delete pods and wait for scale-down (mandatory)
 #
 # Environment: source .env. Set credentials for each provider you want to test.
 # Requires cloudburst-autoscaler-ui at ../cloudburst-autoscaler-ui for UI deployment.
@@ -21,7 +22,6 @@ set -euo pipefail
 #
 # Usage:
 #   ./hack/integration-test-e2e-all-providers.sh
-#   ./hack/integration-test-e2e-all-providers.sh --no-scale-down   # Keep nodes; UI shows max data longer
 #   ./hack/integration-test-e2e-all-providers.sh --keep-cluster   # Skip Kind/instance cleanup for diagnosis
 #   ./hack/integration-test-e2e-all-providers.sh --cloudbroker-dir /path/to/cloudbroker
 
@@ -34,7 +34,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ENV_FILE="${PROJECT_ROOT}/.env"
 CLOUDBROKER_DIR="${CLOUDBROKER_DIR:-${PROJECT_ROOT}/../cloudbroker}"
-DO_SCALE_DOWN=1
 KEEP_CLUSTER=0
 
 # Parse optional args
@@ -42,7 +41,6 @@ i=1
 while [ $i -le $# ]; do
     arg="${!i}"
     case "$arg" in
-        --no-scale-down) DO_SCALE_DOWN=0 ;;
         --keep-cluster) KEEP_CLUSTER=1 ;;
         --cloudbroker-dir=*) CLOUDBROKER_DIR="${arg#*=}" ;;
         --cloudbroker-dir)
@@ -731,6 +729,25 @@ phase_wait_all() {
     log_info "✓ Phase E complete"
 }
 
+# ── Phase E3: Playwright UI assertions ───────────────────────────────────────
+
+phase_playwright() {
+    if ! declare -f run_playwright_ui_assertions &>/dev/null; then
+        log_warn "run_playwright_ui_assertions not available, skipping Playwright"
+        return 0
+    fi
+    log_info "=== Phase E3: Playwright UI assertions ==="
+    cd "${PROJECT_ROOT}"
+
+    for p in "${ENABLED_PROVIDERS[@]}"; do
+        log_info "Running Playwright for provider: ${p}"
+        run_playwright_ui_assertions "${p}" || exit 1
+        echo ""
+    done
+
+    log_info "✓ Phase E3 complete"
+}
+
 # ── Phase E2: UI deployment ───────────────────────────────────────────────────
 
 phase_ui() {
@@ -752,10 +769,9 @@ phase_ui() {
     log_info "✓ Phase E2 complete"
 }
 
-# ── Phase F: Scale-down (optional) ─────────────────────────────────────────────
+# ── Phase F: Scale-down (mandatory) ─────────────────────────────────────────────
 
 phase_scale_down() {
-    [ "$DO_SCALE_DOWN" -eq 0 ] && return 0
     log_info "=== Phase F: Scale-down ==="
     cd "${PROJECT_ROOT}"
 
@@ -771,14 +787,17 @@ phase_scale_down() {
         claims=$(kubectl get nodeclaims -n "${TEST_NAMESPACE}" --no-headers 2>/dev/null | wc -l | tr -d ' ')
         if [ "$claims" -eq 0 ]; then
             log_info "✓ All NodeClaims deleted (scale to zero)"
-            break
+            log_info "✓ Phase F complete"
+            return 0
         fi
         echo -n "."
         sleep 15
         elapsed=$((elapsed + 15))
     done
 
-    log_info "✓ Phase F complete"
+    log_error "Timeout waiting for scale-down (NodeClaims not deleted)"
+    kubectl get nodeclaims -n "${TEST_NAMESPACE}" -o wide 2>/dev/null || true
+    exit 1
 }
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────
@@ -834,6 +853,8 @@ main() {
     phase_nodepools_and_pods
     echo ""
     phase_wait_all
+    echo ""
+    phase_playwright
     echo ""
     phase_scale_down
 

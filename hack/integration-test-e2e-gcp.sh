@@ -33,6 +33,7 @@ if [ -f "${ENV_FILE}" ]; then
 fi
 
 # Configuration
+CLOUDBROKER_DIR="${CLOUDBROKER_DIR:-${PROJECT_ROOT}/../cloudbroker}"
 GCP_PROJECT="${GCP_PROJECT:?GCP_PROJECT must be set (e.g. in .env or environment)}"
 GCP_ZONE="${GCP_ZONE:-us-central1-a}"
 TAILSCALE_AUTHKEY="${TAILSCALE_AUTHKEY:-}"
@@ -95,6 +96,38 @@ get_tailscale_ip() {
     ip=$("$TAILSCALE_CMD" ip -4 2>/dev/null | tr -d '\r\n\t')
     [ -z "$ip" ] && { log_error "Could not get Tailscale IPv4" >&2; return 1; }
     echo "$ip"
+}
+
+# ── CloudBroker (required for recommendations) ───────────────────────────────────
+
+ensure_cloudbroker() {
+    if curl -sf "http://127.0.0.1:8000/health" >/dev/null 2>&1; then
+        log_info "CloudBroker already running at :8000"
+        return 0
+    fi
+    if [ ! -d "${CLOUDBROKER_DIR}" ]; then
+        log_error "CloudBroker not running and CLOUDBROKER_DIR not found: ${CLOUDBROKER_DIR}"
+        log_error "Start CloudBroker manually: cd ../cloudbroker && make up && make migrate && make ingest-gcp"
+        exit 1
+    fi
+    log_info "Starting CloudBroker from ${CLOUDBROKER_DIR}..."
+    (cd "${CLOUDBROKER_DIR}" && docker compose up -d 2>&1) | tail -5
+    log_info "Waiting for CloudBroker API health..."
+    local retries=30
+    while [ $retries -gt 0 ]; do
+        if curl -sf "http://127.0.0.1:8000/health" >/dev/null 2>&1; then
+            log_info "✓ CloudBroker API is healthy"
+            break
+        fi
+        retries=$((retries - 1))
+        [ $retries -eq 0 ] && { log_error "CloudBroker API failed to become healthy"; exit 1; }
+        sleep 2
+    done
+    log_info "Running migrations..."
+    (cd "${CLOUDBROKER_DIR}" && make migrate 2>&1) | tail -3
+    log_info "Ingesting GCP (make ingest-gcp)..."
+    (cd "${CLOUDBROKER_DIR}" && make ingest-gcp 2>&1) | tail -5
+    log_info "✓ CloudBroker ready"
 }
 
 # ── GCP VM Cleanup ─────────────────────────────────────────────────────────────
@@ -725,6 +758,9 @@ main() {
     check_prerequisites
     echo ""
 
+    ensure_cloudbroker
+    echo ""
+
     delete_idle_gcp_vms
     echo ""
 
@@ -814,25 +850,9 @@ main() {
     echo ""
     kubectl get pods -n "${TEST_NAMESPACE}" -o wide
 
-    # Verify graph at http://localhost:8082/clusters/kind-cloudburst/graph returns CloudBurst resources
-    if command -v curl &>/dev/null; then
-        local cluster_id="kind-${KIND_CLUSTER_NAME:-cloudburst}"
-        log_info "Verifying graph data at http://localhost:8082/api/clusters/${cluster_id}/graph..."
-        local graph_json
-        graph_json=$(curl -s -S --connect-timeout 5 "http://127.0.0.1:8082/api/clusters/${cluster_id}/graph" 2>/dev/null || echo "{}")
-        if echo "$graph_json" | grep -qE 'cb-' ; then
-            log_info "✓ Graph contains CloudBurst resources - open http://localhost:8082/clusters/${cluster_id}/graph to verify"
-            # Brief window for browser verification (set GRAPH_VERIFY_SLEEP=0 to skip)
-            local sleep_sec="${GRAPH_VERIFY_SLEEP:-45}"
-            if [ "$sleep_sec" -gt 0 ]; then
-                log_info "Waiting ${sleep_sec}s for graph verification at http://localhost:8082/clusters/${cluster_id}/graph..."
-                sleep "$sleep_sec"
-            fi
-        elif [ -n "$graph_json" ]; then
-            log_warn "Graph API returned data but no CloudBurst nodes found; check http://localhost:8082/clusters/${cluster_id}/graph"
-        else
-            log_warn "Could not fetch /api/clusters/${cluster_id}/graph"
-        fi
+    if declare -f run_playwright_ui_assertions &>/dev/null; then
+        run_playwright_ui_assertions "gcp" || exit 1
+        echo ""
     fi
 
     # Save the GCP instance name for later verification

@@ -708,52 +708,15 @@ func (r *NodePoolReconciler) createNodeClaim(ctx context.Context, nodePool *clou
 			},
 			Alternatives: altDetails,
 		},
-		Status: cloudburstv1alpha1.NodeClaimStatus{
-			Phase: cloudburstv1alpha1.NodeClaimPhasePending,
-			Timestamps: cloudburstv1alpha1.NodeClaimTimestamps{
-				CreatedAt:      metav1.Now(),
-				LastTransition: metav1.Now(),
-			},
-		},
 	}
 
 	if err := r.Create(ctx, nodeClaim); err != nil {
 		return fmt.Errorf("failed to create NodeClaim: %w", err)
 	}
 
-	// Build RecommendationRequest from brokerReq for status
-	recReq := &cloudburstv1alpha1.RecommendationRequestSummary{
-		MinVCPU:            brokerReq.MinVCPU,
-		MinRAMGb:           brokerReq.MinRAMGb,
-		RegionConstraint:   brokerReq.RegionConstraint,
-		MaxPriceEurPerHour: brokerReq.MaxPriceEurPerHour,
-	}
-	if brokerReq.Arch != nil {
-		recReq.Arch = *brokerReq.Arch
-	}
-	if len(brokerReq.AllowedProviders) > 0 {
-		recReq.AllowedProviders = append([]string{}, brokerReq.AllowedProviders...)
-	}
-	if brokerReq.DataSourceProvider != "" {
-		recReq.DataSourceProvider = brokerReq.DataSourceProvider
-		recReq.DataSourceRegion = brokerReq.DataSourceRegion
-		recReq.EstimatedEgressGbPerHour = brokerReq.EstimatedEgressGbPerHour
-		recReq.MaxTCOEurPerHour = brokerReq.MaxTCOEurPerHour
-	}
-
-	// The API server strips status on Create, so set the initial status via a
-	// separate status update.
-	nodeClaim.Status = cloudburstv1alpha1.NodeClaimStatus{
-		Phase:                 cloudburstv1alpha1.NodeClaimPhasePending,
-		RecommendationRequest: recReq,
-		Timestamps: cloudburstv1alpha1.NodeClaimTimestamps{
-			CreatedAt:      metav1.Now(),
-			LastTransition: metav1.Now(),
-		},
-	}
-	if err := r.Status().Update(ctx, nodeClaim); err != nil {
-		logger.Error(err, "failed to set initial NodeClaim status", "nodeClaim", nodeClaim.Name)
-	}
+	// Do NOT set NodeClaim status here. The NodeClaim controller owns status updates.
+	// Setting status from NodePool caused 409 conflicts when both controllers reconciled
+	// concurrently. The NodeClaim controller will set Phase to Pending when it sees empty phase.
 
 	logger.Info("created NodeClaim",
 		"nodeClaim", nodeClaim.Name,

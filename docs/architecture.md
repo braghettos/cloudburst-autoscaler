@@ -150,7 +150,7 @@ All cloud providers implement the common `Provisioner` interface (`internal/prov
 
 Per-provider E2E scripts in `hack/` run a full scale-up and scale-down cycle on a single Kind cluster:
 
-- `integration-test-e2e.sh` (GCP)
+- `integration-test-e2e-gcp.sh` (GCP)
 - `integration-test-e2e-hetzner.sh`, `integration-test-e2e-digitalocean.sh`, `integration-test-e2e-ovh.sh`
 - `integration-test-e2e-scaleway.sh`, `integration-test-e2e-aws.sh`, `integration-test-e2e-azure.sh`
 

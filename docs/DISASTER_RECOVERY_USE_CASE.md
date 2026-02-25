@@ -48,10 +48,10 @@ cp .env.example .env
 # Option A: Full simulation with Scaleway + Hetzner (self-contained setup)
 ./hack/simulate-disaster-recovery.sh
 
-# Option B: Use existing cluster (after running integration-test-e2e-all-providers.sh)
+# Option B: Use existing cluster (run simulate-disaster-recovery.sh first to create it)
 # Use this for GCP, AWS, Azure, or other provider combinations.
-./hack/integration-test-e2e-all-providers.sh --no-scale-down   # one-time setup
-./hack/simulate-disaster-recovery.sh --use-existing-cluster
+./hack/simulate-disaster-recovery.sh   # creates cluster with nodes
+./hack/simulate-disaster-recovery.sh --use-existing-cluster   # re-run DR simulation
 
 # Customize primary and fallback
 PRIMARY_PROVIDER=gcp FALLBACK_PROVIDERS=hetzner,scaleway ./hack/simulate-disaster-recovery.sh --use-existing-cluster

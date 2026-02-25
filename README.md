@@ -135,7 +135,7 @@ cb-<nodepool-name>-<random-suffix>
 
 | Layer | Technology |
 |-------|-----------|
-| Language | Go 1.21+ |
+| Language | Go 1.24+ |
 | Framework | controller-runtime (Kubebuilder) |
 | CRDs | NodePool, NodeClass, NodeClaim |
 | Cloud SDKs | google-cloud-go, scaleway-sdk-go, hcloud-go, godo (DigitalOcean), go-ovh (OVH), aws-sdk-go-v2 (AWS), azure-sdk-for-go (Azure) |
@@ -148,7 +148,7 @@ cb-<nodepool-name>-<random-suffix>
 
 ### Prerequisites
 
-- Go 1.21+
+- Go 1.24+
 - Docker
 - kubectl
 - [Kind](https://kind.sigs.k8s.io/) (for local development)
@@ -223,7 +223,7 @@ Or from the UI repo: `cd ../cloudburst-autoscaler-ui && make run`. For in-cluste
 
 ```bash
 # Full E2E test (GCP): pod triggers autoscaling, then scale-down
-./hack/integration-test-e2e.sh
+./hack/integration-test-e2e-gcp.sh
 
 # Per-provider E2E tests (scale-up + scale-down on a single provider)
 ./hack/integration-test-e2e-hetzner.sh
@@ -235,6 +235,9 @@ Or from the UI repo: `cd ../cloudburst-autoscaler-ui && make run`. For in-cluste
 
 # All-providers: full E2E in one Kind cluster with all enabled providers from .env
 ./hack/integration-test-e2e-all-providers.sh
+
+# UI E2E: validates CloudBurst UI against a running cluster
+./hack/integration-test-e2e-ui.sh
 ```
 
 ## Project Structure
@@ -257,11 +260,16 @@ Or from the UI repo: `cd ../cloudburst-autoscaler-ui && make run`. For in-cluste
 │   │   ├── join.go                  # kubeadm token + discovery kubeconfig
 │   │   └── startup_script.go        # Full cloud-init script builder
 │   ├── cloudbroker/                 # CloudBroker API client
+│   ├── provisioner/                 # Provisioner factory (multi-provider)
 │   ├── gcp/                         # GCP Compute Engine provisioner
 │   ├── scaleway/                    # Scaleway Instances provisioner
 │   ├── hetzner/                     # Hetzner Cloud provisioner
 │   ├── digitalocean/                # DigitalOcean Droplets provisioner
+│   ├── ovh/                         # OVH Cloud provisioner
+│   ├── aws/                         # AWS EC2 provisioner
+│   ├── azure/                       # Azure VM provisioner
 │   ├── planner/                     # Capacity planning utilities
+│   ├── metrics/                     # Prometheus metrics
 │   └── tailscale/                   # Tailscale API client
 ├── config/                          # Kubernetes manifests (Kustomize)
 │   ├── crd/                         # CRD definitions
@@ -271,7 +279,7 @@ Or from the UI repo: `cd ../cloudburst-autoscaler-ui && make run`. For in-cluste
 │   └── samples/                     # Example CRs
 ├── hack/                            # Development and test scripts
 │   ├── create-kind.sh               # Create local Kind cluster
-│   ├── integration-test-e2e.sh           # E2E test (GCP)
+│   ├── integration-test-e2e-gcp.sh       # E2E test (GCP)
 │   ├── integration-test-e2e-hetzner.sh   # E2E test (Hetzner)
 │   ├── integration-test-e2e-digitalocean.sh  # E2E test (DigitalOcean)
 │   ├── integration-test-e2e-ovh.sh       # E2E test (OVH)
@@ -279,6 +287,7 @@ Or from the UI repo: `cd ../cloudburst-autoscaler-ui && make run`. For in-cluste
 │   ├── integration-test-e2e-aws.sh       # E2E test (AWS EC2)
 │   ├── integration-test-e2e-azure.sh     # E2E test (Azure VM)
 │   ├── integration-test-e2e-all-providers.sh  # Full E2E with all enabled providers
+│   ├── integration-test-e2e-ui.sh   # E2E test for CloudBurst UI
 │   └── run-all-e2e.sh               # Run per-provider E2E tests sequentially
 └── docs/                            # Additional documentation
 ```
@@ -338,6 +347,7 @@ metadata:
   name: hetzner-standard
 spec:
   hetzner:
+    # location overrides CloudBroker recommendation (e.g. when chosen location is disabled)
     location: fsn1
     apiTokenSecretRef:
       name: hetzner-api-token

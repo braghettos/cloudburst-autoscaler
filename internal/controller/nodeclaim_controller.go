@@ -107,13 +107,18 @@ func (r *NodeClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		// Failed state, don't retry automatically
 		return ctrl.Result{}, nil
 	default:
-		// Unknown phase, set to Pending
+		// Unknown phase, set to Pending. Retry on conflict (NodePool may have just created this NodeClaim).
 		logger.Info("unknown phase, setting to Pending", "phase", nodeClaim.Status.Phase)
 		fromPhase := nodeClaim.Status.Phase
-		nodeClaim.Status.Phase = cloudburstv1alpha1.NodeClaimPhasePending
 		metrics.NodeClaimPhaseTransitionsTotal.WithLabelValues(nodeClaim.Spec.Chosen.Provider, string(fromPhase), string(cloudburstv1alpha1.NodeClaimPhasePending)).Inc()
-		nodeClaim.Status.Timestamps.LastTransition = metav1.Now()
-		return ctrl.Result{}, r.Status().Update(ctx, nodeClaim)
+		apply := func(nc *cloudburstv1alpha1.NodeClaim) {
+			nc.Status.Phase = cloudburstv1alpha1.NodeClaimPhasePending
+			nc.Status.Timestamps.LastTransition = metav1.Now()
+		}
+		if err := r.statusUpdateWithRetry(ctx, nodeClaim, apply, logger); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
 	}
 }
 
@@ -342,7 +347,12 @@ func getProvisioningParams(provider string, nodeClass *cloudburstv1alpha1.NodeCl
 		if nodeClass.Spec.Hetzner == nil {
 			return "", "", fmt.Errorf("NodeClass spec.hetzner is required")
 		}
-		return chosenRegion, nodeClass.Spec.Hetzner.Image, nil
+		// NodeClass.Location overrides CloudBroker recommendation (e.g. when chosen location is disabled).
+		hetznerLocation := chosenRegion
+		if nodeClass.Spec.Hetzner.Location != "" {
+			hetznerLocation = nodeClass.Spec.Hetzner.Location
+		}
+		return hetznerLocation, nodeClass.Spec.Hetzner.Image, nil
 	case "digitalocean":
 		if nodeClass.Spec.DigitalOcean == nil {
 			return "", "", fmt.Errorf("NodeClass spec.digitalocean is required")
@@ -543,8 +553,8 @@ func (r *NodeClaimReconciler) handleJoining(ctx context.Context, nodeClaim *clou
 				break
 			}
 		}
-		// Fallback: match by GCP provider ID (instance name) in case hostname didn't apply
-		if instanceName != "" && node.Spec.ProviderID != "" && strings.Contains(node.Spec.ProviderID, instanceName) {
+		// Fallback: match by provider ID (instance name or full instance ID for OVH/UUID-style IDs)
+		if providerIDMatchesInstance(node.Spec.ProviderID, nodeClaim.Status.InstanceID) {
 			matchingNode = node
 			matchReason = "providerID"
 			break
@@ -828,6 +838,7 @@ func (r *NodeClaimReconciler) handleDeletion(ctx context.Context, nodeClaim *clo
 				} else {
 					defer prov.Close()
 					if err := prov.DeleteInstance(ctx, nodeClaim.Status.InstanceID); err != nil {
+						metrics.ProviderErrorsTotal.WithLabelValues(provider, "delete").Inc()
 						logger.Error(err, "failed to delete instance", "instanceID", nodeClaim.Status.InstanceID, "provider", provider)
 						r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InstanceDeletionFailed", fmt.Sprintf("Failed to delete %s instance: %v", provider, err))
 						// Don't fail deletion if instance deletion fails
@@ -860,7 +871,9 @@ func instanceNameForProvider(provider, nodeClaimName string) string {
 	return nodeClaimName
 }
 
-// instanceNameFromID returns the instance name from a GCP instance ID (projects/.../zones/.../instances/name).
+// instanceNameFromID returns the instance name from an instance ID.
+// GCP: projects/.../zones/.../instances/name -> name
+// OVH: ovh/projectId/uuid -> uuid (last segment)
 func instanceNameFromID(instanceID string) string {
 	if instanceID == "" {
 		return ""
@@ -870,6 +883,46 @@ func instanceNameFromID(instanceID string) string {
 		return parts[len(parts)-1]
 	}
 	return ""
+}
+
+// providerIDMatchesInstance returns true if the node's providerID identifies the given instance.
+// Handles GCP (providerID contains instance name) and OVH (providerID may contain full
+// instance ID "ovh/projectId/uuid" or just the UUID).
+func providerIDMatchesInstance(providerID, instanceID string) bool {
+	if providerID == "" || instanceID == "" {
+		return false
+	}
+	// providerID often contains the instance identifier (e.g. gce://project/zone/name, ovh://project/uuid)
+	if strings.Contains(providerID, instanceID) {
+		return true
+	}
+	// OVH uses UUID-style IDs; CCM may use only the UUID part in providerID
+	instanceName := instanceNameFromID(instanceID)
+	if instanceName != "" && instanceName != instanceID && strings.Contains(providerID, instanceName) {
+		return true
+	}
+	return false
+}
+
+// statusUpdateWithRetry performs Status().Update with retry on conflict (up to 3 attempts).
+// Used to avoid 409 when NodePool and NodeClaim controllers reconcile concurrently.
+// apply is called before each Update to set the desired status fields.
+func (r *NodeClaimReconciler) statusUpdateWithRetry(ctx context.Context, nodeClaim *cloudburstv1alpha1.NodeClaim, apply func(*cloudburstv1alpha1.NodeClaim), logger logr.Logger) error {
+	for attempt := 0; attempt < 3; attempt++ {
+		apply(nodeClaim)
+		if err := r.Status().Update(ctx, nodeClaim); err != nil {
+			if errors.IsConflict(err) && attempt < 2 {
+				logger.V(1).Info("status update conflict, re-fetching and retrying", "attempt", attempt+1)
+				if err := r.Get(ctx, client.ObjectKeyFromObject(nodeClaim), nodeClaim); err != nil {
+					return err
+				}
+				continue
+			}
+			return err
+		}
+		return nil
+	}
+	return nil
 }
 
 // updateStatus updates NodeClaim status with error

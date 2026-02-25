@@ -73,6 +73,23 @@ main() {
   echo ""
   verify_ui_ready || exit 1
   echo ""
+  log_info "Waiting for dashboard API to be ready..."
+  local cluster_id_ready
+  cluster_id_ready=$(curl -s --connect-timeout 5 "http://127.0.0.1:8082/api/clusters" 2>/dev/null | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4) || true
+  [ -z "${cluster_id_ready}" ] && cluster_id_ready="${CLUSTER_ID}"
+  local i=0
+  while [ $i -lt 12 ]; do
+    if curl -s --connect-timeout 5 "http://127.0.0.1:8082/api/clusters/${cluster_id_ready}/dashboard" 2>/dev/null | grep -q '"totalPods"'; then
+      log_info "✓ Dashboard API ready"
+      break
+    fi
+    sleep 2
+    i=$((i + 1))
+  done
+  if [ $i -ge 12 ]; then
+    log_warn "Dashboard API may not be ready; Playwright will run anyway"
+  fi
+  echo ""
 
   # 4. Playwright - navigate each page
   if [ ! -d "${UI_REPO}/web" ]; then

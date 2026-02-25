@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -70,9 +71,24 @@ func NewProvisioner(ctx context.Context, apiToken, location string) (*Provisione
 
 // CreateInstance creates a Hetzner Cloud server with the given name, server type, and cloud-init script.
 // Returns instanceID in the form "hetzner/<location>/<server-id>".
+// When the chosen location returns "server location disabled", tries alternative locations from the API.
 func (p *Provisioner) CreateInstance(ctx context.Context, name, serverType, location, startupScript, imageFromConfig string) (string, error) {
-	var lastErr error
+	instanceID, err := p.createInstanceOnce(ctx, name, serverType, location, startupScript, imageFromConfig)
+	if err == nil {
+		return instanceID, nil
+	}
 
+	// When location is disabled, try alternative locations instead of failing immediately.
+	if isLocationDisabledError(err) {
+		altID, altErr := p.tryAlternativeLocations(ctx, name, serverType, location, startupScript, imageFromConfig, err)
+		if altErr == nil {
+			return altID, nil
+		}
+		return "", altErr
+	}
+
+	// Retry transient errors.
+	var lastErr error
 	for attempt := 0; attempt <= MaxRetries; attempt++ {
 		if attempt > 0 {
 			waitTime := RetryDelay * time.Duration(1<<uint(attempt-1))
@@ -119,9 +135,21 @@ func (p *Provisioner) createInstanceOnce(ctx context.Context, name, serverType, 
 		UserData: startupScript,
 	}
 
-	result, _, err := p.client.Server.Create(ctx, opts)
+	result, resp, err := p.client.Server.Create(ctx, opts)
 	if err != nil {
-		return "", fmt.Errorf("failed to create server: %w", err)
+		// Include full error and response for debugging (Hetzner API sometimes returns generic "server_error")
+		errMsg := err.Error()
+		if resp != nil && resp.Body != nil {
+			// Response body may contain API error details
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			if len(bodyBytes) > 0 {
+				errMsg = fmt.Sprintf("%s (API response: %s)", errMsg, strings.TrimSpace(string(bodyBytes)))
+			}
+		}
+		if errMsg == "" || strings.TrimSpace(errMsg) == "" {
+			errMsg = "unknown Hetzner API error"
+		}
+		return "", fmt.Errorf("failed to create server: %s", errMsg)
 	}
 
 	// Wait for the create action to complete
@@ -253,6 +281,91 @@ func parseInstanceID(instanceID string) (string, int64, error) {
 		return "", 0, fmt.Errorf("invalid server ID in instance ID %s: %w", instanceID, err)
 	}
 	return parts[0], serverID, nil
+}
+
+// isLocationDisabledError returns true when the Hetzner API reports the location as disabled.
+func isLocationDisabledError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "resource_unavailable") || strings.Contains(s, "location disabled")
+}
+
+// tryAlternativeLocations attempts to create the server in other Hetzner locations when the chosen one is disabled.
+// Removes any orphaned server with the same name (e.g. in the failed location from a previous run) before retrying.
+func (p *Provisioner) tryAlternativeLocations(ctx context.Context, name, serverType, failedLocation, startupScript, imageFromConfig string, originalErr error) (string, error) {
+	// Remove orphaned server that may block creation (e.g. in failed location from previous run)
+	if err := p.deleteServerByNameIfInLocation(ctx, name, failedLocation); err != nil {
+		return "", fmt.Errorf("location disabled (%s), failed to remove orphaned server: %w", failedLocation, err)
+	}
+
+	locations, err := p.client.Location.All(ctx)
+	if err != nil {
+		return "", fmt.Errorf("location disabled (%s), failed to list alternatives: %w", failedLocation, originalErr)
+	}
+
+	var lastErr error
+	for _, loc := range locations {
+		if loc.Name == failedLocation {
+			continue
+		}
+		instanceID, err := p.createInstanceOnce(ctx, name, serverType, loc.Name, startupScript, imageFromConfig)
+		if err == nil {
+			return instanceID, nil
+		}
+		// If "server name is already used", remove the blocking server (may be in this location) and retry
+		if isUniquenessError(err) {
+			_ = p.deleteServerByName(ctx, name)
+			instanceID, retryErr := p.createInstanceOnce(ctx, name, serverType, loc.Name, startupScript, imageFromConfig)
+			if retryErr == nil {
+				return instanceID, nil
+			}
+			lastErr = retryErr
+		} else {
+			lastErr = err
+		}
+	}
+
+	return "", fmt.Errorf("location %s disabled, tried %d alternatives without success: %w", failedLocation, len(locations)-1, lastErr)
+}
+
+// deleteServerByNameIfInLocation deletes a server by name only if it exists in the given location.
+func (p *Provisioner) deleteServerByNameIfInLocation(ctx context.Context, name, location string) error {
+	server, _, err := p.client.Server.GetByName(ctx, name)
+	if err != nil || server == nil {
+		return nil // no server or error looking up - nothing to delete
+	}
+	if server.Location == nil || server.Location.Name != location {
+		return nil // server is in a different location, leave it
+	}
+	result, _, err := p.client.Server.DeleteWithResult(ctx, server)
+	if err != nil {
+		return err
+	}
+	if result.Action != nil {
+		_ = p.client.Action.WaitFor(ctx, result.Action)
+	}
+	return nil
+}
+
+// deleteServerByName deletes a server by name if it exists (any location).
+func (p *Provisioner) deleteServerByName(ctx context.Context, name string) error {
+	server, _, err := p.client.Server.GetByName(ctx, name)
+	if err != nil || server == nil {
+		return nil
+	}
+	_, _, err = p.client.Server.DeleteWithResult(ctx, server)
+	return err
+}
+
+// isUniquenessError returns true when the Hetzner API reports server name is already used.
+func isUniquenessError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "uniqueness_error") || strings.Contains(s, "server name is already used")
 }
 
 // isRetryableError checks if an error is retryable.

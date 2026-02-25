@@ -88,7 +88,7 @@ deploy_ui() {
         rm -f "${UI_KUBECONFIG_TMP}"
         return 1
     fi
-    sleep 3
+    sleep 5
     if ! docker ps -q -f name="^${UI_CONTAINER}$" | grep -q .; then
         log_error "UI container failed to start"
         docker logs "${UI_CONTAINER}" 2>&1 | tail -20
@@ -151,4 +151,69 @@ verify_ui_ready() {
         log_info "✓ All UI API endpoints returned 200"
     fi
     return 0
+}
+
+# run_playwright_ui_assertions runs Playwright E2E tests against the UI with real NodeClaims.
+# Call after pod is Running and before scale-down. Requires: node, npm, cloudburst-autoscaler-ui.
+# Usage: run_playwright_ui_assertions "<provider>"   e.g. run_playwright_ui_assertions "hetzner"
+# Optional: SKIP_UI_ASSERT=1 to skip (e.g. for faster iteration when debugging provisioning).
+run_playwright_ui_assertions() {
+    local provider="${1:-}"
+    if [ "${SKIP_UI_ASSERT:-0}" = "1" ]; then
+        log_warn "Skipping Playwright UI assertions (SKIP_UI_ASSERT=1)"
+        return 0
+    fi
+    if [ ! -d "${UI_REPO}" ]; then
+        log_warn "cloudburst-autoscaler-ui not found at ${UI_REPO}, skipping Playwright"
+        return 0
+    fi
+    if [ ! -d "${UI_REPO}/web" ]; then
+        log_warn "cloudburst-autoscaler-ui/web not found, skipping Playwright"
+        return 0
+    fi
+    if ! docker ps -q -f name="^${UI_CONTAINER}$" 2>/dev/null | grep -q .; then
+        log_warn "UI container not running, skipping Playwright"
+        return 0
+    fi
+
+    log_info "Running Playwright UI assertions (provider=${provider})..."
+    local cluster_id
+    cluster_id=$(curl -s --connect-timeout 5 "http://127.0.0.1:8082/api/clusters" 2>/dev/null | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4) || true
+    [ -z "${cluster_id}" ] && cluster_id="kind-${KIND_CLUSTER_NAME:-cloudburst}"
+    log_info "E2E cluster ID: ${cluster_id}"
+
+    # Warmup: ensure cluster is in registry and dashboard returns 200 (avoids "Cluster not found")
+    log_info "Warming up UI API (cluster ${cluster_id} must be in registry)..."
+    local warmup_retries=30
+    while [ $warmup_retries -gt 0 ]; do
+        if curl -sf "http://127.0.0.1:8082/api/clusters/${cluster_id}/dashboard" >/dev/null 2>&1; then
+            log_info "✓ Cluster ${cluster_id} in registry, dashboard API ready"
+            break
+        fi
+        warmup_retries=$((warmup_retries - 1))
+        if [ $warmup_retries -eq 0 ]; then
+            log_error "Dashboard warmup failed: cluster ${cluster_id} not found. Check: curl -s http://127.0.0.1:8082/api/clusters"
+            exit 1
+        fi
+        sleep 2
+    done
+
+    if (cd "${UI_REPO}/web" && {
+        if ! npm ls @playwright/test &>/dev/null; then
+            log_info "Installing npm dependencies (including Playwright)..."
+            npm install
+        fi
+        log_info "Installing Playwright browsers (chromium)..."
+        npx playwright install chromium
+        if UI_BASE_URL="http://127.0.0.1:8082" CLUSTER_ID="${cluster_id}" E2E_PROVIDER="${provider}" npm run e2e 2>&1; then
+            log_info "✓ Playwright UI assertions passed"
+        else
+            log_error "Playwright UI assertions failed"
+            exit 1
+        fi
+    }); then
+        return 0
+    else
+        return 1
+    fi
 }

@@ -627,6 +627,10 @@ main() {
     fi
 
     echo ""
+    if declare -f run_playwright_ui_assertions &>/dev/null; then
+        run_playwright_ui_assertions "ovh" || exit 1
+        echo ""
+    fi
     OVH_INSTANCE_ID=$(kubectl get nodeclaim "${NODECLAIM_NAME}" -n "${TEST_NAMESPACE}" -o jsonpath='{.status.instanceID}' 2>/dev/null || echo "")
     log_info "=== Scale-down ==="
     delete_pending_pod

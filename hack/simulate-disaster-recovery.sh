@@ -155,7 +155,7 @@ run_full_setup() {
     # The all-providers script creates nodepools per provider in phase D. We need to either:
     # 1) Patch it to support --dr-mode, or
     # 2) Run it fully, delete its nodepools, then run our DR flow.
-    # Simplest: run all-providers with --no-scale-down, it creates nodepools for ALL enabled providers.
+    # The all-providers script always scales down; we do our own setup for DR simulation.
     # Our script needs specific providers. So we must ensure only PRIMARY+FALLBACK are enabled.
     # The all-providers auto-detects from env. If we have GCP+Scaleway+Hetzner in .env, it will
     # create 3 nodepools. We can't easily restrict that without forking.

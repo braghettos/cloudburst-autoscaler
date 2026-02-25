@@ -816,24 +816,9 @@ main() {
     echo ""
     kubectl get pods -n "${TEST_NAMESPACE}" -o wide
 
-    # Verify graph at http://localhost:8082/graph returns CloudBurst resources (NodePools, NodeClaims, Nodes, Pods)
-    if command -v curl &>/dev/null; then
-        log_info "Verifying graph data at http://localhost:8082/api/graph..."
-        local graph_json
-        graph_json=$(curl -s -S --connect-timeout 5 "http://127.0.0.1:8082/api/graph" 2>/dev/null || echo "{}")
-        if echo "$graph_json" | grep -qE 'cb-' ; then
-            log_info "✓ Graph contains CloudBurst resources - open http://localhost:8082/graph to verify"
-            # Brief window for browser verification (set GRAPH_VERIFY_SLEEP=0 to skip)
-            local sleep_sec="${GRAPH_VERIFY_SLEEP:-45}"
-            if [ "$sleep_sec" -gt 0 ]; then
-                log_info "Waiting ${sleep_sec}s for graph verification at http://localhost:8082/graph..."
-                sleep "$sleep_sec"
-            fi
-        elif [ -n "$graph_json" ]; then
-            log_warn "Graph API returned data but no CloudBurst nodes found; check http://localhost:8082/graph"
-        else
-            log_warn "Could not fetch /api/graph"
-        fi
+    if declare -f run_playwright_ui_assertions &>/dev/null; then
+        run_playwright_ui_assertions "hetzner" || exit 1
+        echo ""
     fi
 
     # Save the Hetzner server ID for later verification

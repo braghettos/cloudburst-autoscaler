@@ -765,6 +765,11 @@ main() {
     echo ""
     kubectl get pods -n "${TEST_NAMESPACE}" -o wide
 
+    if declare -f run_playwright_ui_assertions &>/dev/null; then
+        run_playwright_ui_assertions "digitalocean" || exit 1
+        echo ""
+    fi
+
     saved_instance_id=$(kubectl get nodeclaim "${NODECLAIM_NAME}" -n "${TEST_NAMESPACE}" -o jsonpath='{.status.instanceID}' 2>/dev/null || echo "")
     saved_droplet_id=""
     if [ -n "$saved_instance_id" ]; then

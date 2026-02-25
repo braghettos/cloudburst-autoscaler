@@ -812,6 +812,10 @@ main() {
     saved_ec2_id=""
     [ -n "$saved_instance_id" ] && saved_ec2_id=$(echo "$saved_instance_id" | awk -F'/' '{print $NF}')
     echo ""
+    if declare -f run_playwright_ui_assertions &>/dev/null; then
+        run_playwright_ui_assertions "aws" || exit 1
+        echo ""
+    fi
     log_info "=== Scale-Down: Deleting Pod to Trigger NodeClaim Removal ==="
     delete_pending_pod
     echo ""
