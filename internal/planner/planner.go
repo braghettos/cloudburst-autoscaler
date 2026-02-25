@@ -146,20 +146,18 @@ func ExtractArchFromPod(pod *corev1.Pod) string {
 		}
 
 		// Check preferredDuringSchedulingIgnoredDuringExecution (use first match)
-		if preferred := pod.Spec.Affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution; preferred != nil {
-			for _, pref := range preferred {
-				for _, expr := range pref.Preference.MatchExpressions {
-					if expr.Key == "kubernetes.io/arch" {
-						if len(expr.Values) > 0 {
-							return expr.Values[0] // Return raw value, CloudBroker will normalize
-						}
+		for _, pref := range pod.Spec.Affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution {
+			for _, expr := range pref.Preference.MatchExpressions {
+				if expr.Key == "kubernetes.io/arch" {
+					if len(expr.Values) > 0 {
+						return expr.Values[0] // Return raw value, CloudBroker will normalize
 					}
 				}
-				for _, field := range pref.Preference.MatchFields {
-					if field.Key == "kubernetes.io/arch" {
-						if len(field.Values) > 0 {
-							return field.Values[0] // Return raw value, CloudBroker will normalize
-						}
+			}
+			for _, field := range pref.Preference.MatchFields {
+				if field.Key == "kubernetes.io/arch" {
+					if len(field.Values) > 0 {
+						return field.Values[0] // Return raw value, CloudBroker will normalize
 					}
 				}
 			}
@@ -202,17 +200,15 @@ func PodHasProviderOrNodePoolConstraint(pod *corev1.Pod) bool {
 			}
 		}
 		preferred := pod.Spec.Affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution
-		if preferred != nil {
-			for _, pref := range preferred {
-				for _, expr := range pref.Preference.MatchExpressions {
-					if expr.Key == providerKey || expr.Key == nodepoolKey {
-						return true
-					}
+		for _, pref := range preferred {
+			for _, expr := range pref.Preference.MatchExpressions {
+				if expr.Key == providerKey || expr.Key == nodepoolKey {
+					return true
 				}
-				for _, field := range pref.Preference.MatchFields {
-					if field.Key == providerKey || field.Key == nodepoolKey {
-						return true
-					}
+			}
+			for _, field := range pref.Preference.MatchFields {
+				if field.Key == providerKey || field.Key == nodepoolKey {
+					return true
 				}
 			}
 		}
