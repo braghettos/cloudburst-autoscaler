@@ -66,7 +66,7 @@ type NodePoolReconciler struct {
 //+kubebuilder:rbac:groups=cloudburst.io,resources=nodepools/finalizers,verbs=update
 //+kubebuilder:rbac:groups=cloudburst.io,resources=nodeclaims,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=cloudburst.io,resources=nodeclaims/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch;update
 //+kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;patch;delete
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
@@ -242,6 +242,13 @@ func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			logger.Error(err, "no matching NodeClass")
 			r.recordEvent(nodePool, corev1.EventTypeWarning, "NoMatchingNodeClass", err.Error())
 			return ctrl.Result{}, err
+		}
+
+		// Patch pods without provider/nodepool constraint so they land on the node we're about to provision.
+		// This ensures workloads without nodeAffinity are bound to the chosen provider.
+		if err := r.patchPodsWithProviderAffinity(ctx, chosen.Provider, logger); err != nil {
+			logger.Error(err, "failed to patch pods with provider affinity")
+			// Don't block NodeClaim creation; pods may still schedule correctly
 		}
 
 		// Create NodeClaims using the matched NodeClass (chosen + alternatives for fallback on create failure)
@@ -472,6 +479,48 @@ func (r *NodePoolReconciler) calculateDesiredCapacity(ctx context.Context) (plan
 
 	// Calculate desired capacity
 	return planner.CalculateDesiredCapacity(eligiblePods), nil
+}
+
+// patchPodsWithProviderAffinity patches eligible unschedulable pods that have no
+// cloudburst.io/provider or cloudburst.io/nodepool constraint, adding nodeAffinity
+// for the chosen provider so they land on the node being provisioned.
+func (r *NodePoolReconciler) patchPodsWithProviderAffinity(ctx context.Context, provider string, logger logr.Logger) error {
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList); err != nil {
+		return fmt.Errorf("unable to list pods: %w", err)
+	}
+
+	eligiblePods := r.filterEligiblePods(podList.Items)
+	patched := 0
+	for i := range eligiblePods {
+		pod := &eligiblePods[i]
+		if planner.PodHasProviderOrNodePoolConstraint(pod) {
+			continue
+		}
+
+		// Fetch latest to avoid conflict
+		latest := &corev1.Pod{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(pod), latest); err != nil {
+			logger.Error(err, "unable to fetch pod for patch", "pod", pod.Name, "namespace", pod.Namespace)
+			continue
+		}
+		if planner.PodHasProviderOrNodePoolConstraint(latest) {
+			continue
+		}
+
+		original := latest.DeepCopy()
+		latest.Spec.Affinity = planner.AddProviderNodeAffinity(latest, provider)
+		if err := r.Patch(ctx, latest, client.MergeFrom(original)); err != nil {
+			logger.Error(err, "failed to patch pod with provider affinity", "pod", latest.Name, "namespace", latest.Namespace, "provider", provider)
+			continue
+		}
+		logger.Info("patched pod with provider affinity", "pod", latest.Name, "namespace", latest.Namespace, "provider", provider)
+		patched++
+	}
+	if patched > 0 {
+		logger.Info("patched pods with provider affinity", "count", patched, "provider", provider)
+	}
+	return nil
 }
 
 // filterEligiblePods filters pods that are eligible for demand detection

@@ -611,3 +611,147 @@ func TestCalculateDesiredCapacityWithArch(t *testing.T) {
 		})
 	}
 }
+
+func TestPodHasProviderOrNodePoolConstraint(t *testing.T) {
+	tests := []struct {
+		name     string
+		pod      corev1.Pod
+		expected bool
+	}{
+		{
+			name:     "no constraints",
+			pod:      corev1.Pod{Spec: corev1.PodSpec{}},
+			expected: false,
+		},
+		{
+			name: "nodeSelector cloudburst.io/provider",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					NodeSelector: map[string]string{"cloudburst.io/provider": "gcp"},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "nodeSelector cloudburst.io/nodepool",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					NodeSelector: map[string]string{"cloudburst.io/nodepool": "my-pool"},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "nodeAffinity required cloudburst.io/provider",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					Affinity: &corev1.Affinity{
+						NodeAffinity: &corev1.NodeAffinity{
+							RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+								NodeSelectorTerms: []corev1.NodeSelectorTerm{
+									{
+										MatchExpressions: []corev1.NodeSelectorRequirement{
+											{Key: "cloudburst.io/provider", Operator: corev1.NodeSelectorOpIn, Values: []string{"scaleway"}},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "nodeAffinity with only kubernetes.io/arch - no provider constraint",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					Affinity: &corev1.Affinity{
+						NodeAffinity: &corev1.NodeAffinity{
+							RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+								NodeSelectorTerms: []corev1.NodeSelectorTerm{
+									{
+										MatchExpressions: []corev1.NodeSelectorRequirement{
+											{Key: "kubernetes.io/arch", Operator: corev1.NodeSelectorOpIn, Values: []string{"amd64"}},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := PodHasProviderOrNodePoolConstraint(&tt.pod)
+			if result != tt.expected {
+				t.Errorf("expected %v, got %v", tt.expected, result)
+			}
+		})
+	}
+}
+
+func TestAddProviderNodeAffinity(t *testing.T) {
+	tests := []struct {
+		name           string
+		pod            corev1.Pod
+		provider       string
+		expectProvider string
+	}{
+		{
+			name:           "pod with no affinity",
+			pod:            corev1.Pod{Spec: corev1.PodSpec{}},
+			provider:       "scaleway",
+			expectProvider: "scaleway",
+		},
+		{
+			name: "pod with existing nodeAffinity for arch",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					Affinity: &corev1.Affinity{
+						NodeAffinity: &corev1.NodeAffinity{
+							RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+								NodeSelectorTerms: []corev1.NodeSelectorTerm{
+									{
+										MatchExpressions: []corev1.NodeSelectorRequirement{
+											{Key: "kubernetes.io/arch", Operator: corev1.NodeSelectorOpIn, Values: []string{"amd64"}},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			provider:       "hetzner",
+			expectProvider: "hetzner",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			affinity := AddProviderNodeAffinity(&tt.pod, tt.provider)
+			if affinity == nil || affinity.NodeAffinity == nil {
+				t.Fatal("expected non-nil affinity with NodeAffinity")
+			}
+			required := affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+			if required == nil || len(required.NodeSelectorTerms) == 0 {
+				t.Fatal("expected required NodeSelectorTerms")
+			}
+			found := false
+			for _, expr := range required.NodeSelectorTerms[0].MatchExpressions {
+				if expr.Key == "cloudburst.io/provider" && len(expr.Values) > 0 && expr.Values[0] == tt.expectProvider {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("expected cloudburst.io/provider=%q in MatchExpressions, got %+v", tt.expectProvider, required.NodeSelectorTerms[0].MatchExpressions)
+			}
+		})
+	}
+}

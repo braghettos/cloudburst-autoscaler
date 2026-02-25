@@ -168,3 +168,95 @@ func ExtractArchFromPod(pod *corev1.Pod) string {
 
 	return ""
 }
+
+// PodHasProviderOrNodePoolConstraint returns true if the pod already has a constraint
+// on cloudburst.io/provider or cloudburst.io/nodepool via nodeSelector or nodeAffinity.
+// Such pods do not need to be patched by the controller.
+func PodHasProviderOrNodePoolConstraint(pod *corev1.Pod) bool {
+	const providerKey = "cloudburst.io/provider"
+	const nodepoolKey = "cloudburst.io/nodepool"
+
+	if pod.Spec.NodeSelector != nil {
+		if _, ok := pod.Spec.NodeSelector[providerKey]; ok {
+			return true
+		}
+		if _, ok := pod.Spec.NodeSelector[nodepoolKey]; ok {
+			return true
+		}
+	}
+
+	if pod.Spec.Affinity != nil && pod.Spec.Affinity.NodeAffinity != nil {
+		required := pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+		if required != nil {
+			for _, term := range required.NodeSelectorTerms {
+				for _, expr := range term.MatchExpressions {
+					if expr.Key == providerKey || expr.Key == nodepoolKey {
+						return true
+					}
+				}
+				for _, field := range term.MatchFields {
+					if field.Key == providerKey || field.Key == nodepoolKey {
+						return true
+					}
+				}
+			}
+		}
+		preferred := pod.Spec.Affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution
+		if preferred != nil {
+			for _, pref := range preferred {
+				for _, expr := range pref.Preference.MatchExpressions {
+					if expr.Key == providerKey || expr.Key == nodepoolKey {
+						return true
+					}
+				}
+				for _, field := range pref.Preference.MatchFields {
+					if field.Key == providerKey || field.Key == nodepoolKey {
+						return true
+					}
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+// AddProviderNodeAffinity returns a copy of the pod's affinity with
+// cloudburst.io/provider=provider added to requiredDuringSchedulingIgnoredDuringExecution.
+// Merges with existing nodeAffinity if present; otherwise creates a new structure.
+func AddProviderNodeAffinity(pod *corev1.Pod, provider string) *corev1.Affinity {
+	providerExpr := corev1.NodeSelectorRequirement{
+		Key:      "cloudburst.io/provider",
+		Operator: corev1.NodeSelectorOpIn,
+		Values:   []string{provider},
+	}
+
+	var required *corev1.NodeSelector
+	if pod.Spec.Affinity != nil && pod.Spec.Affinity.NodeAffinity != nil &&
+		pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution != nil {
+		required = pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.DeepCopy()
+	} else {
+		required = &corev1.NodeSelector{
+			NodeSelectorTerms: []corev1.NodeSelectorTerm{{}},
+		}
+	}
+
+	// Add provider constraint to the first term
+	if len(required.NodeSelectorTerms) == 0 {
+		required.NodeSelectorTerms = []corev1.NodeSelectorTerm{{}}
+	}
+	required.NodeSelectorTerms[0].MatchExpressions = append(
+		required.NodeSelectorTerms[0].MatchExpressions,
+		providerExpr,
+	)
+
+	affinity := pod.Spec.Affinity.DeepCopy()
+	if affinity == nil {
+		affinity = &corev1.Affinity{}
+	}
+	if affinity.NodeAffinity == nil {
+		affinity.NodeAffinity = &corev1.NodeAffinity{}
+	}
+	affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution = required
+	return affinity
+}
