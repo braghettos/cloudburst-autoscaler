@@ -42,6 +42,7 @@ const (
 // Client is the CloudBroker API client
 type Client struct {
 	baseURL    string
+	apiKey     string
 	httpClient *http.Client
 }
 
@@ -115,6 +116,7 @@ func NewClient() *Client {
 
 	return &Client{
 		baseURL:    baseURL,
+		apiKey:     os.Getenv("CLOUDBROKER_API_KEY"),
 		httpClient: httpClient,
 	}
 }
@@ -159,14 +161,17 @@ func (c *Client) recommendOnce(ctx context.Context, req *RecommendationRequest) 
 	}
 
 	// Create HTTP request
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Set request body
+	// Set request body and headers
 	httpReq.Body = io.NopCloser(bytes.NewReader(reqBody))
 	httpReq.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		httpReq.Header.Set("X-API-Key", c.apiKey)
+	}
 
 	// Make request
 	resp, err := c.httpClient.Do(httpReq)

@@ -319,6 +319,7 @@ data:
 |----------|----------|-------------|
 | `TAILSCALE_AUTHKEY` | Yes | Tailscale auth key for node registration |
 | `CLOUDBROKER_BASEURL` | No | CloudBroker API URL (default: `http://localhost:8000`) |
+| `CLOUDBROKER_API_KEY` | No | API key for CloudBroker (required when CloudBroker has API_KEY set in production) |
 | `GOOGLE_APPLICATION_CREDENTIALS` | GCP only | Path to GCP service account JSON key |
 | `HETZNER_API_TOKEN` | Hetzner only | Hetzner Cloud API token |
 | `DIGITALOCEAN_API_TOKEN` | DigitalOcean only | DigitalOcean API token |

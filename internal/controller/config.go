@@ -55,6 +55,7 @@ func LoadConfig() *ControllerConfig {
 	}
 }
 
+// durationFromEnv reads a duration from the environment. Invalid or empty values fall back to defaultVal.
 func durationFromEnv(key string, defaultVal time.Duration) time.Duration {
 	s := os.Getenv(key)
 	if s == "" {

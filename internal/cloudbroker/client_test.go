@@ -123,7 +123,7 @@ func TestNewClient(t *testing.T) {
 func TestRecommend_Success(t *testing.T) {
 	// Create test server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
+		if r.Method != http.MethodPost {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
 		if r.URL.Path != "/api/recommendations" {
