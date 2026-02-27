@@ -787,10 +787,12 @@ main() {
     echo ""
     create_nodepool
     echo ""
+    if declare -f run_playwright_screenshots_phase &>/dev/null; then run_playwright_screenshots_phase "empty" "gcp"; echo ""; fi
 
     # 6. Create a pending pod that is unschedulable -> triggers autoscaling
     create_pending_pod
     echo ""
+    if declare -f run_playwright_screenshots_phase &>/dev/null; then run_playwright_screenshots_phase "pending" "gcp"; echo ""; fi
 
     # 7. Wait for the controller to auto-create a NodeClaim
     log_info "=== Monitoring Autoscaling Lifecycle ==="
@@ -799,6 +801,7 @@ main() {
         exit 1
     fi
     echo ""
+    if declare -f run_playwright_screenshots_phase &>/dev/null; then run_playwright_screenshots_phase "provisioning" "gcp"; echo ""; fi
 
     # 8. Monitor NodeClaim lifecycle
     if ! wait_for_phase "Provisioning" "${PROVISIONING_TIMEOUT}"; then
@@ -830,11 +833,13 @@ main() {
         kubectl logs -n "${CONTROLLER_NAMESPACE}" -l app=cloudburst-controller --tail=60 2>/dev/null || true
         exit 1
     fi
+    if declare -f run_playwright_screenshots_phase &>/dev/null; then run_playwright_screenshots_phase "ready" "gcp"; echo ""; fi
 
     # 9. Verify the pending pod gets scheduled onto the new node
     echo ""
     if wait_for_pod_running "${POD_SCHEDULED_TIMEOUT}"; then
         log_info "✓ Pod scheduled onto GCP node"
+        if declare -f run_playwright_screenshots_phase &>/dev/null; then run_playwright_screenshots_phase "scheduled" "gcp"; echo ""; fi
     else
         log_error "Pod was not scheduled after node became Ready"
         kubectl get pods -n "${TEST_NAMESPACE}" -o wide

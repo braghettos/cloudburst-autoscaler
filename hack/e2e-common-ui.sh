@@ -153,6 +153,41 @@ verify_ui_ready() {
     return 0
 }
 
+# run_playwright_screenshots_phase captures screenshots at a specific lifecycle phase.
+# Call from integration-test-e2e-{provider}.sh at: empty, pending, provisioning, ready, scheduled.
+# Usage: run_playwright_screenshots_phase "empty" "gcp"
+run_playwright_screenshots_phase() {
+    local phase="${1:-}"
+    local prov="${2:-gcp}"
+    if [ -z "$phase" ]; then
+        log_warn "run_playwright_screenshots_phase: phase required (empty|pending|provisioning|ready|scheduled)"
+        return 0
+    fi
+    if [ ! -d "${UI_REPO}" ] || [ ! -d "${UI_REPO}/web" ]; then
+        log_warn "cloudburst-autoscaler-ui not found, skipping screenshots"
+        return 0
+    fi
+    if ! docker ps -q -f name="^${UI_CONTAINER}$" 2>/dev/null | grep -q .; then
+        log_warn "UI container not running, skipping screenshots"
+        return 0
+    fi
+
+    local cluster_id
+    cluster_id=$(curl -s --connect-timeout 5 "http://127.0.0.1:8082/api/clusters" 2>/dev/null | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4) || true
+    [ -z "${cluster_id}" ] && cluster_id="kind-${KIND_CLUSTER_NAME:-cloudburst}"
+
+    log_info "Capturing screenshots: phase=${phase} provider=${prov}"
+    (cd "${UI_REPO}/web" && {
+        if ! npm ls @playwright/test &>/dev/null; then npm install; fi
+        npx playwright install chromium 2>/dev/null || true
+        if UI_BASE_URL="http://127.0.0.1:8082" CLUSTER_ID="${cluster_id}" E2E_SCREENSHOT_PHASE="${phase}" E2E_PROVIDER="${prov}" npm run e2e:screenshots-phase 2>&1; then
+            log_info "✓ Screenshots captured for phase ${phase}"
+        else
+            log_warn "Screenshot capture failed for phase ${phase}"
+        fi
+    })
+}
+
 # run_playwright_ui_assertions runs Playwright E2E tests against the UI with real NodeClaims.
 # Call after pod is Running and before scale-down. Requires: node, npm, cloudburst-autoscaler-ui.
 # Usage: run_playwright_ui_assertions "<provider>"   e.g. run_playwright_ui_assertions "hetzner"
