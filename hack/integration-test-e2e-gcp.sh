@@ -503,7 +503,33 @@ wait_for_nodeclaim_creation() {
     return 1
 }
 
-# Wait for NodeClaim to reach a given phase
+# Wait for NodeClaim to be exactly in a given phase (for screenshot capture)
+# Use when we need to capture a specific transient phase (e.g. Provisioning)
+wait_for_phase_exact() {
+    local phase=$1
+    local timeout=${2:-120}
+    local elapsed=0
+    local current=""
+
+    log_info "Waiting for NodeClaim ${NODECLAIM_NAME} to be in phase: $phase (timeout: ${timeout}s)"
+    while [ $elapsed -lt $timeout ]; do
+        current=$(kubectl get nodeclaim "${NODECLAIM_NAME}" -n "${TEST_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+
+        [ "$current" = "Failed" ] && { log_error "NodeClaim entered Failed phase"; return 1; }
+        if [ "$current" = "$phase" ]; then
+            log_info "✓ NodeClaim is in phase: $phase"
+            return 0
+        fi
+
+        echo -n "."
+        sleep 2
+        elapsed=$((elapsed + 2))
+    done
+    log_warn "Timeout: NodeClaim never in exact phase $phase (last: ${current:-unknown})"
+    return 1
+}
+
+# Wait for NodeClaim to reach a given phase (or later)
 wait_for_phase() {
     local phase=$1
     local timeout=${2:-600}
@@ -800,10 +826,19 @@ main() {
         log_error "Controller did not create a NodeClaim"
         exit 1
     fi
-    echo ""
-    if declare -f run_playwright_screenshots_phase &>/dev/null; then run_playwright_screenshots_phase "provisioning" "gcp"; echo ""; fi
 
     # 8. Monitor NodeClaim lifecycle
+    # Capture provisioning screenshots while NodeClaim is exactly in Provisioning phase
+    # Must run before wait_for_phase (which returns when already Joining/Ready)
+    if declare -f run_playwright_screenshots_phase &>/dev/null; then
+        if wait_for_phase_exact "Provisioning" 90; then
+            run_playwright_screenshots_phase "provisioning" "gcp"
+            echo ""
+        else
+            log_warn "Skipping provisioning screenshots (NodeClaim already past Provisioning)"
+        fi
+    fi
+
     if ! wait_for_phase "Provisioning" "${PROVISIONING_TIMEOUT}"; then
         log_error "Failed to reach Provisioning phase"
         log_info "Controller logs (last 60 lines):"
