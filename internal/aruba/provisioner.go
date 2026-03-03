@@ -203,7 +203,8 @@ func (p *Provisioner) ensureNetwork(ctx context.Context, location string) (vpcUR
 		return "", "", "", fmt.Errorf("list VPCs %d: %s", vpcList.StatusCode, formatAPIError(vpcList.StatusCode, vpcList.Error, vpcList.RawBody))
 	}
 
-	for _, v := range vpcList.Data.Values {
+	for i := range vpcList.Data.Values {
+		v := &vpcList.Data.Values[i]
 		locVal := ""
 		if v.Metadata.LocationResponse != nil {
 			locVal = v.Metadata.LocationResponse.Value
@@ -331,7 +332,8 @@ func (p *Provisioner) ensureKeyPair(ctx context.Context, location string) (strin
 	if !listResp.IsSuccess() {
 		return "", fmt.Errorf("list key pairs %d: %s", listResp.StatusCode, formatAPIError(listResp.StatusCode, listResp.Error, listResp.RawBody))
 	}
-	for _, kp := range listResp.Data.Values {
+	for i := range listResp.Data.Values {
+		kp := &listResp.Data.Values[i]
 		locVal := ""
 		if kp.Metadata.LocationResponse != nil {
 			locVal = kp.Metadata.LocationResponse.Value
@@ -368,7 +370,8 @@ func (p *Provisioner) ensureElasticIP(ctx context.Context, location string) (str
 	if !listResp.IsSuccess() {
 		return "", fmt.Errorf("list elastic IPs %d: %s", listResp.StatusCode, formatAPIError(listResp.StatusCode, listResp.Error, listResp.RawBody))
 	}
-	for _, eip := range listResp.Data.Values {
+	for i := range listResp.Data.Values {
+		eip := &listResp.Data.Values[i]
 		locVal := ""
 		if eip.Metadata.LocationResponse != nil {
 			locVal = eip.Metadata.LocationResponse.Value
