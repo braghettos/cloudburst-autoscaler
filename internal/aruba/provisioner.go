@@ -30,14 +30,14 @@ import (
 )
 
 const (
-	InstanceIDPrefix       = "aruba/"
-	DefaultImage           = "LU22-001" // Ubuntu 22 64bit
-	MaxRetries             = 3
-	RetryDelay             = 2 * time.Second
+	InstanceIDPrefix        = "aruba/"
+	DefaultImage            = "LU22-001" // Ubuntu 22 64bit
+	MaxRetries              = 3
+	RetryDelay              = 2 * time.Second
 	cloudburstVPCName       = "cloudburst-default"
 	cloudburstKeyPairName   = "cloudburst-default"
 	cloudburstElasticIPName = "cloudburst-default"
-	cloudburstSSHPublicKey = "ssh-rsa AAAAB3NzaC1yc2EAAAABJQAAAQEA2No7At0tgHrcZTL0kGWyLLUqPKfOhD9hGdNV9PbJxhjOGNFxcwdQ9wCXsJ3RQaRHBuGIgVodDurrlqzxFK86yCHMgXT2YLHF0j9P4m9GDiCfOK6msbFb89p5xZExjwD2zK+w68r7iOKZeRB2yrznW5TD3KDemSPIQQIVcyLF+yxft49HWBTI3PVQ4rBVOBJ2PdC9SAOf7CYnptW24CRrC0h85szIDwMA+Kmasfl3YGzk4MxheHrTO8C40aXXpieJ9S2VQA4VJAMRyAboptIK0cKjBYrbt5YkEL0AlyBGPIu6MPYr5K/MHyDunDi9yc7VYRYRR0f46MBOSqMUiGPnMw== cloudburst@aruba"
+	cloudburstSSHPublicKey  = "ssh-rsa AAAAB3NzaC1yc2EAAAABJQAAAQEA2No7At0tgHrcZTL0kGWyLLUqPKfOhD9hGdNV9PbJxhjOGNFxcwdQ9wCXsJ3RQaRHBuGIgVodDurrlqzxFK86yCHMgXT2YLHF0j9P4m9GDiCfOK6msbFb89p5xZExjwD2zK+w68r7iOKZeRB2yrznW5TD3KDemSPIQQIVcyLF+yxft49HWBTI3PVQ4rBVOBJ2PdC9SAOf7CYnptW24CRrC0h85szIDwMA+Kmasfl3YGzk4MxheHrTO8C40aXXpieJ9S2VQA4VJAMRyAboptIK0cKjBYrbt5YkEL0AlyBGPIu6MPYr5K/MHyDunDi9yc7VYRYRR0f46MBOSqMUiGPnMw== cloudburst@aruba"
 )
 
 // Provisioner handles Aruba Cloud Server provisioning using the official SDK.
@@ -151,13 +151,13 @@ func (p *Provisioner) createInstanceOnce(ctx context.Context, name, flavorName, 
 			Location:                types.LocationRequest{Value: loc},
 		},
 		Properties: types.CloudServerPropertiesRequest{
-			Zone:        dc,
-			VPC:         types.ReferenceResource{URI: vpcURI},
-			BootVolume:  types.ReferenceResource{URI: volResp.URI},
-			KeyPair:     types.ReferenceResource{URI: keyPairURI},
-			ElastcIP:    types.ReferenceResource{URI: elasticIPURI}, // SDK typo: ElastcIP
-			FlavorName:  strPtr(flavorName),
-			Subnets:     []types.ReferenceResource{{URI: subnetURI}},
+			Zone:           dc,
+			VPC:            types.ReferenceResource{URI: vpcURI},
+			BootVolume:     types.ReferenceResource{URI: volResp.URI},
+			KeyPair:        types.ReferenceResource{URI: keyPairURI},
+			ElastcIP:       types.ReferenceResource{URI: elasticIPURI}, // SDK typo: ElastcIP
+			FlavorName:     strPtr(flavorName),
+			Subnets:        []types.ReferenceResource{{URI: subnetURI}},
 			SecurityGroups: []types.ReferenceResource{{URI: sgURI}},
 		},
 	}
@@ -454,7 +454,7 @@ func (p *Provisioner) createBootVolume(ctx context.Context, volName, location, d
 		},
 		Properties: types.BlockStoragePropertiesRequest{
 			SizeGB:        20,
-			BillingPeriod:  "Hour",
+			BillingPeriod: "Hour",
 			Zone:          &dc,
 			Type:          types.BlockStorageTypeStandard,
 			Bootable:      &bootable,

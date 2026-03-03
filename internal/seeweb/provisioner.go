@@ -132,9 +132,9 @@ func (p *Provisioner) createInstanceOnce(ctx context.Context, name, plan, locati
 
 	payload := map[string]interface{}{
 		"plan":     plan,
-		"image":   image,
+		"image":    image,
 		"location": location,
-		"notes":   name,
+		"notes":    name,
 	}
 	if startupScript != "" {
 		payload["user_customize"] = startupScript
