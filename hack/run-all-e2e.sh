@@ -100,7 +100,15 @@ else
     PROVIDERS_SKIP=$((PROVIDERS_SKIP + 1))
 fi
 
-# 4. OVH
+# 4. Aruba
+if [ -n "${ARUBA_API_KEY:-}" ] && [ -n "${ARUBA_API_SECRET:-}" ] && [ -n "${ARUBA_PROJECT_ID:-}" ]; then
+    run_test "aruba" "${SCRIPT_DIR}/integration-test-e2e-aruba.sh"
+else
+    echo -e "${YELLOW}[SKIP] Aruba: missing one or more ARUBA_API_KEY, ARUBA_API_SECRET, ARUBA_PROJECT_ID${NC}"
+    PROVIDERS_SKIP=$((PROVIDERS_SKIP + 1))
+fi
+
+# 5. OVH
 if [ -n "${OVH_APPLICATION_KEY:-}" ] && [ -n "${OVH_APPLICATION_SECRET:-}" ] && [ -n "${OVH_CONSUMER_KEY:-}" ] && [ -n "${OVH_PROJECT_ID:-}" ]; then
     run_test "ovh" "${SCRIPT_DIR}/integration-test-e2e-ovh.sh"
 else
@@ -108,7 +116,7 @@ else
     PROVIDERS_SKIP=$((PROVIDERS_SKIP + 1))
 fi
 
-# 5. Azure
+# 6. Azure
 if [ -n "${AZURE_SUBSCRIPTION_ID:-}" ] && [ -n "${AZURE_RESOURCE_GROUP:-}" ] && [ -n "${AZURE_SUBNET_ID:-}" ] && [ -n "${AZURE_TENANT_ID:-}" ]; then
     run_test "azure" "${SCRIPT_DIR}/integration-test-e2e-azure.sh"
 else
@@ -124,7 +132,7 @@ else
     PROVIDERS_SKIP=$((PROVIDERS_SKIP + 1))
 fi
 
-# 7. AWS
+# 8. AWS
 if [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ]; then
     run_test "aws" "${SCRIPT_DIR}/integration-test-e2e-aws.sh"
 else

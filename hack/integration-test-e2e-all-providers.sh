@@ -87,8 +87,9 @@ ENABLED_PROVIDERS=()
 [ -n "${SCW_SECRET_KEY:-}" ]                 && ENABLED_PROVIDERS+=("scaleway")
 [ -n "${HETZNER_API_TOKEN:-}" ]              && ENABLED_PROVIDERS+=("hetzner")
 [ -n "${DIGITALOCEAN_API_TOKEN:-}" ]         && ENABLED_PROVIDERS+=("digitalocean")
+[ -n "${ARUBA_API_KEY:-}" ]                  && [ -n "${ARUBA_API_SECRET:-}" ] && [ -n "${ARUBA_PROJECT_ID:-}" ] && ENABLED_PROVIDERS+=("aruba")
 [ -n "${OVH_APPLICATION_KEY:-}" ]            && [ -n "${OVH_APPLICATION_SECRET:-}" ] && [ -n "${OVH_CONSUMER_KEY:-}" ] && [ -n "${OVH_PROJECT_ID:-}" ] && ENABLED_PROVIDERS+=("ovh")
-[ -n "${AWS_ACCESS_KEY_ID:-}" ]              && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ] && ENABLED_PROVIDERS+=("aws")
+[ -n "${AWS_ACCESS_KEY_ID:-}" ]               && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ] && ENABLED_PROVIDERS+=("aws")
 [ -n "${AZURE_TENANT_ID:-}" ]                && [ -n "${AZURE_CLIENT_ID:-}" ] && [ -n "${AZURE_CLIENT_SECRET:-}" ] && [ -n "${AZURE_SUBSCRIPTION_ID:-}" ] && [ -n "${AZURE_RESOURCE_GROUP:-}" ] && [ -n "${AZURE_SUBNET_ID:-}" ] && ENABLED_PROVIDERS+=("azure")
 
 log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
@@ -108,7 +109,7 @@ check_prerequisites() {
     [ -z "$TAILSCALE_CMD" ] && { log_error "tailscale not found"; missing=$((missing+1)); }
     ! "$TAILSCALE_CMD" status &>/dev/null && { log_error "Tailscale not running"; missing=$((missing+1)); }
     [ -z "${TAILSCALE_AUTHKEY}" ] && { log_error "TAILSCALE_AUTHKEY not set"; missing=$((missing+1)); }
-    [ ${#ENABLED_PROVIDERS[@]} -eq 0 ] && { log_error "No provider credentials set. Set env for at least one of: gcp, scaleway, hetzner, digitalocean, ovh, aws, azure"; missing=$((missing+1)); }
+    [ ${#ENABLED_PROVIDERS[@]} -eq 0 ] && { log_error "No provider credentials set. Set env for at least one of: gcp, scaleway, hetzner, digitalocean, aruba, ovh, aws, azure"; missing=$((missing+1)); }
     if [[ " ${ENABLED_PROVIDERS[*]} " =~ " gcp " ]]; then
         [ -z "${GCP_PROJECT:-}" ] && { log_error "GCP_PROJECT not set (required when GCP is enabled). Set in .env or it will be read from GOOGLE_APPLICATION_CREDENTIALS"; missing=$((missing+1)); }
     fi
@@ -491,6 +492,11 @@ phase_nodeclass_and_secrets() {
         -n "${TEST_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
     [ -n "${DIGITALOCEAN_API_TOKEN:-}" ] && \
         kubectl create secret generic digitalocean-api-token --from-literal=DIGITALOCEAN_API_TOKEN="${DIGITALOCEAN_API_TOKEN}" -n "${TEST_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+    [ -n "${ARUBA_API_KEY:-}" ] && [ -n "${ARUBA_API_SECRET:-}" ] && [ -n "${ARUBA_PROJECT_ID:-}" ] && \
+        kubectl create secret generic aruba-api-credentials \
+        --from-literal=ARUBA_API_KEY="${ARUBA_API_KEY}" \
+        --from-literal=ARUBA_API_SECRET="${ARUBA_API_SECRET}" \
+        -n "${TEST_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
     [ -n "${OVH_APPLICATION_KEY:-}" ] && [ -n "${OVH_APPLICATION_SECRET:-}" ] && [ -n "${OVH_CONSUMER_KEY:-}" ] && \
         kubectl create secret generic ovh-api-credentials \
         --from-literal=OVH_APPLICATION_KEY="${OVH_APPLICATION_KEY}" \
@@ -550,6 +556,17 @@ phase_nodeclass_and_secrets() {
             echo "    apiTokenSecretRef:"
             echo "      name: digitalocean-api-token"
             echo "      key: DIGITALOCEAN_API_TOKEN"
+        fi
+        # Aruba
+        if [[ " ${ENABLED_PROVIDERS[*]} " =~ " aruba " ]]; then
+            echo "  aruba:"
+            echo "    projectID: \"${ARUBA_PROJECT_ID}\""
+            echo "    applicationKeySecretRef:"
+            echo "      name: aruba-api-credentials"
+            echo "      key: ARUBA_API_KEY"
+            echo "    applicationSecretSecretRef:"
+            echo "      name: aruba-api-credentials"
+            echo "      key: ARUBA_API_SECRET"
         fi
         # OVH
         if [[ " ${ENABLED_PROVIDERS[*]} " =~ " ovh " ]]; then

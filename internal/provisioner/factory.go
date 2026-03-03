@@ -22,6 +22,7 @@ import (
 	"os"
 
 	cloudburstv1alpha1 "github.com/diegobraga/cloudburst-autoscaler/api/v1alpha1"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/aruba"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/aws"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/azure"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/digitalocean"
@@ -29,6 +30,7 @@ import (
 	"github.com/diegobraga/cloudburst-autoscaler/internal/hetzner"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/ovh"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/scaleway"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/seeweb"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -60,6 +62,10 @@ func NewFromNodeClass(ctx context.Context, provider string, nodeClass *cloudburs
 		return newAWS(ctx, nodeClass, namespace, c, region)
 	case "azure":
 		return newAzure(ctx, nodeClass, namespace, c, region)
+	case "seeweb":
+		return newSeeweb(ctx, nodeClass, namespace, c, region)
+	case "aruba":
+		return newAruba(ctx, nodeClass, namespace, c, region)
 	default:
 		return nil, fmt.Errorf("unsupported provider: %s", provider)
 	}
@@ -323,4 +329,84 @@ func newAzure(ctx context.Context, nodeClass *cloudburstv1alpha1.NodeClass, name
 		clientSecret = os.Getenv("AZURE_CLIENT_SECRET")
 	}
 	return azure.NewProvisioner(ctx, subID, rg, location, subnetID, tenantID, clientID, clientSecret)
+}
+
+func newSeeweb(ctx context.Context, nodeClass *cloudburstv1alpha1.NodeClass, namespace string, c Getter, location string) (Provisioner, error) {
+	if nodeClass.Spec.Seeweb == nil {
+		return nil, fmt.Errorf("NodeClass spec.seeweb is required for Seeweb provider")
+	}
+	var username, password string
+	if nodeClass.Spec.Seeweb.CredentialsSecretRef != nil {
+		secret := &corev1.Secret{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: nodeClass.Spec.Seeweb.CredentialsSecretRef.Name}, secret); err != nil {
+			return nil, fmt.Errorf("failed to get Seeweb credentials secret: %w", err)
+		}
+		k := nodeClass.Spec.Seeweb.CredentialsSecretRef.Key
+		if k == "" {
+			k = "SEEWEB_USERNAME"
+		}
+		username = string(secret.Data[k])
+		if username == "" {
+			username = string(secret.Data["SEEWEB_USERNAME"])
+		}
+		password = string(secret.Data["SEEWEB_PASSWORD"])
+		if password == "" {
+			password = string(secret.Data["password"])
+		}
+	}
+	if username == "" {
+		username = os.Getenv("SEEWEB_USERNAME")
+	}
+	if password == "" {
+		password = os.Getenv("SEEWEB_PASSWORD")
+	}
+	if username == "" || password == "" {
+		return nil, fmt.Errorf("Seeweb credentials required: set spec.seeweb.credentialsSecretRef or SEEWEB_USERNAME, SEEWEB_PASSWORD env vars")
+	}
+	return seeweb.NewProvisioner(ctx, username, password)
+}
+
+func newAruba(ctx context.Context, nodeClass *cloudburstv1alpha1.NodeClass, namespace string, c Getter, region string) (Provisioner, error) {
+	if nodeClass.Spec.Aruba == nil || nodeClass.Spec.Aruba.ProjectID == "" {
+		return nil, fmt.Errorf("NodeClass spec.aruba with projectID is required for Aruba provider")
+	}
+	var appKey, appSecret string
+	if nodeClass.Spec.Aruba.ApplicationKeySecretRef != nil {
+		secret := &corev1.Secret{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: nodeClass.Spec.Aruba.ApplicationKeySecretRef.Name}, secret); err != nil {
+			return nil, fmt.Errorf("failed to get Aruba application key secret: %w", err)
+		}
+		k := nodeClass.Spec.Aruba.ApplicationKeySecretRef.Key
+		if k == "" {
+			k = "ARUBA_API_KEY"
+		}
+		appKey = string(secret.Data[k])
+		if appKey == "" {
+			appKey = string(secret.Data["api_key"])
+		}
+	}
+	if nodeClass.Spec.Aruba.ApplicationSecretSecretRef != nil {
+		secret := &corev1.Secret{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: nodeClass.Spec.Aruba.ApplicationSecretSecretRef.Name}, secret); err != nil {
+			return nil, fmt.Errorf("failed to get Aruba application secret: %w", err)
+		}
+		k := nodeClass.Spec.Aruba.ApplicationSecretSecretRef.Key
+		if k == "" {
+			k = "ARUBA_API_SECRET"
+		}
+		appSecret = string(secret.Data[k])
+		if appSecret == "" {
+			appSecret = string(secret.Data["api_secret"])
+		}
+	}
+	if appKey == "" {
+		appKey = os.Getenv("ARUBA_API_KEY")
+	}
+	if appSecret == "" {
+		appSecret = os.Getenv("ARUBA_API_SECRET")
+	}
+	if appKey == "" || appSecret == "" {
+		return nil, fmt.Errorf("Aruba credentials required: set spec.aruba secret refs or ARUBA_API_KEY, ARUBA_API_SECRET env vars")
+	}
+	return aruba.NewProvisioner(ctx, "https://api.arubacloud.com", appKey, appSecret, "", nodeClass.Spec.Aruba.ProjectID)
 }

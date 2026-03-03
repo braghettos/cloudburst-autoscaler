@@ -203,8 +203,8 @@ func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 				"priceEurPerHour", alt.PriceEurPerHour,
 			)
 		}
-		if chosen.Provider != "gcp" && chosen.Provider != "scaleway" && chosen.Provider != "hetzner" && chosen.Provider != "digitalocean" && chosen.Provider != "ovh" && chosen.Provider != "aws" && chosen.Provider != "azure" {
-			err := fmt.Errorf("recommendation provider is %q, only gcp, scaleway, hetzner, digitalocean, ovh, aws, and azure are supported", chosen.Provider)
+		if chosen.Provider != "gcp" && chosen.Provider != "scaleway" && chosen.Provider != "hetzner" && chosen.Provider != "digitalocean" && chosen.Provider != "ovh" && chosen.Provider != "aws" && chosen.Provider != "azure" && chosen.Provider != "aruba" {
+			err := fmt.Errorf("recommendation provider is %q, only gcp, scaleway, hetzner, digitalocean, ovh, aws, azure, and aruba are supported", chosen.Provider)
 			logger.Error(err, "unsupported provider")
 			r.recordEvent(nodePool, corev1.EventTypeWarning, "UnsupportedProvider", err.Error())
 			return ctrl.Result{}, err
@@ -667,6 +667,8 @@ func (r *NodePoolReconciler) nodeClassSupportsProvider(nodeClass *cloudburstv1al
 		return nodeClass.Spec.AWS != nil && nodeClass.Spec.AWS.AMI != ""
 	case "azure":
 		return nodeClass.Spec.Azure != nil && nodeClass.Spec.Azure.SubscriptionID != "" && nodeClass.Spec.Azure.ResourceGroup != "" && nodeClass.Spec.Azure.SubnetID != ""
+	case "aruba":
+		return nodeClass.Spec.Aruba != nil && nodeClass.Spec.Aruba.ProjectID != ""
 	default:
 		return false
 	}

@@ -39,6 +39,66 @@ spec:
           spec:
             description: NodeClassSpec defines the desired state of NodeClass
             properties:
+              aruba:
+                description: Aruba configuration (used when NodeClaim Chosen.Provider
+                  is aruba)
+                properties:
+                  applicationKeySecretRef:
+                    description: ApplicationKeySecretRef references a secret containing
+                      the Aruba API key (client_id).
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  applicationSecretSecretRef:
+                    description: ApplicationSecretSecretRef references a secret containing
+                      the Aruba API secret (client_secret).
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  dataCenter:
+                    description: DataCenter is the datacenter (e.g. ITBG-1, ITBG-2,
+                      ITBG-3). Defaults to ITBG-1.
+                    type: string
+                  image:
+                    description: 'Image is the Aruba image for boot volume (default:
+                      LU22-001 for Ubuntu 22)'
+                    type: string
+                  projectID:
+                    description: ProjectID is the Aruba Cloud project ID
+                    type: string
+                required:
+                - projectID
+                type: object
               aws:
                 description: AWS configuration (used when NodeClaim Chosen.Provider
                   is aws)
@@ -466,6 +526,41 @@ spec:
                   zone:
                     description: Zone is the Scaleway zone (optional when region comes
                       from CloudBroker recommendation; used as fallback)
+                    type: string
+                type: object
+              seeweb:
+                description: Seeweb configuration (used when NodeClaim Chosen.Provider
+                  is seeweb)
+                properties:
+                  credentialsSecretRef:
+                    description: |-
+                      CredentialsSecretRef references a secret containing Seeweb credentials.
+                      Secret must have keys "SEEWEB_USERNAME" and "SEEWEB_PASSWORD".
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  image:
+                    description: 'Image is the Seeweb image name (default: ubuntu-2204)'
+                    type: string
+                  location:
+                    description: Location is the Seeweb datacenter (optional when
+                      region comes from CloudBroker; e.g. it-fr2, it-mi2, ch-lug1,
+                      bg-sof1)
                     type: string
                 type: object
               tailscale:

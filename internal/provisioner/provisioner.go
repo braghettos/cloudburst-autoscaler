@@ -16,7 +16,9 @@ limitations under the License.
 
 package provisioner
 
-import "context"
+import (
+	"context"
+)
 
 // Provisioner is the common interface all cloud providers must implement.
 type Provisioner interface {

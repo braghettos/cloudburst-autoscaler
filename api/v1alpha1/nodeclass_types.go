@@ -51,6 +51,14 @@ type NodeClassSpec struct {
 	// +optional
 	Azure *AzureConfig `json:"azure,omitempty"`
 
+	// Seeweb configuration (used when NodeClaim Chosen.Provider is seeweb)
+	// +optional
+	Seeweb *SeewebConfig `json:"seeweb,omitempty"`
+
+	// Aruba configuration (used when NodeClaim Chosen.Provider is aruba)
+	// +optional
+	Aruba *ArubaConfig `json:"aruba,omitempty"`
+
 	// Join configuration for joining the Kubernetes cluster
 	Join JoinConfig `json:"join"`
 
@@ -203,6 +211,44 @@ type AWSConfig struct {
 	// SecretAccessKeySecretRef references a secret containing the AWS secret access key.
 	// +optional
 	SecretAccessKeySecretRef *corev1.SecretKeySelector `json:"secretAccessKeySecretRef,omitempty"`
+}
+
+// SeewebConfig defines Seeweb Cloud Server-specific configuration
+type SeewebConfig struct {
+	// Location is the Seeweb datacenter (optional when region comes from CloudBroker; e.g. it-fr2, it-mi2, ch-lug1, bg-sof1)
+	// +optional
+	Location string `json:"location,omitempty"`
+
+	// CredentialsSecretRef references a secret containing Seeweb credentials.
+	// Secret must have keys "SEEWEB_USERNAME" and "SEEWEB_PASSWORD".
+	// +optional
+	CredentialsSecretRef *corev1.SecretKeySelector `json:"credentialsSecretRef,omitempty"`
+
+	// Image is the Seeweb image name (default: ubuntu-2204)
+	// +optional
+	Image string `json:"image,omitempty"`
+}
+
+// ArubaConfig defines Aruba Cloud Server-specific configuration
+type ArubaConfig struct {
+	// ProjectID is the Aruba Cloud project ID
+	ProjectID string `json:"projectID"`
+
+	// DataCenter is the datacenter (e.g. ITBG-1, ITBG-2, ITBG-3). Defaults to ITBG-1.
+	// +optional
+	DataCenter string `json:"dataCenter,omitempty"`
+
+	// Image is the Aruba image for boot volume (default: LU22-001 for Ubuntu 22)
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// ApplicationKeySecretRef references a secret containing the Aruba API key (client_id).
+	// +optional
+	ApplicationKeySecretRef *corev1.SecretKeySelector `json:"applicationKeySecretRef,omitempty"`
+
+	// ApplicationSecretSecretRef references a secret containing the Aruba API secret (client_secret).
+	// +optional
+	ApplicationSecretSecretRef *corev1.SecretKeySelector `json:"applicationSecretSecretRef,omitempty"`
 }
 
 // AzureConfig defines Azure VM-specific configuration

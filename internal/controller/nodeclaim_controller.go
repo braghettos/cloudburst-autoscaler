@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -26,7 +27,7 @@ import (
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -40,6 +41,7 @@ import (
 
 	cloudburstv1alpha1 "github.com/diegobraga/cloudburst-autoscaler/api/v1alpha1"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/bootstrap"
+	cloudbursterrors "github.com/diegobraga/cloudburst-autoscaler/internal/errors"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/metrics"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/provisioner"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/tailscale"
@@ -77,7 +79,7 @@ func (r *NodeClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Fetch NodeClaim
 	nodeClaim := &cloudburstv1alpha1.NodeClaim{}
 	if err := r.Get(ctx, req.NamespacedName, nodeClaim); err != nil {
-		if errors.IsNotFound(err) {
+		if k8serrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "unable to fetch NodeClaim")
@@ -386,6 +388,26 @@ func getProvisioningParams(provider string, nodeClass *cloudburstv1alpha1.NodeCl
 			azureLocation = nodeClass.Spec.Azure.Location
 		}
 		return azureLocation, nodeClass.Spec.Azure.ImageReference, nil
+	case "seeweb":
+		if nodeClass.Spec.Seeweb == nil {
+			return "", "", fmt.Errorf("NodeClass spec.seeweb is required")
+		}
+		// CloudBroker returns region slugs like it-fr2, it-mi2, ch-lug1, bg-sof1
+		seewebLocation := chosenRegion
+		if nodeClass.Spec.Seeweb.Location != "" {
+			seewebLocation = nodeClass.Spec.Seeweb.Location
+		}
+		return seewebLocation, nodeClass.Spec.Seeweb.Image, nil
+	case "aruba":
+		if nodeClass.Spec.Aruba == nil {
+			return "", "", fmt.Errorf("NodeClass spec.aruba is required")
+		}
+		// CloudBroker returns itbg-bergamo; Aruba uses ITBG-Bergamo and ITBG-1/2/3 for datacenter
+		arubaLocation := chosenRegion
+		if arubaLocation == "" {
+			arubaLocation = "itbg-bergamo"
+		}
+		return arubaLocation, nodeClass.Spec.Aruba.Image, nil
 	default:
 		return "", "", fmt.Errorf("unsupported provider: %s", provider)
 	}
@@ -452,6 +474,14 @@ func (r *NodeClaimReconciler) handleProvisioning(ctx context.Context, nodeClaim 
 	defer prov.Close()
 	isRunning, err := prov.IsInstanceRunning(ctx, nodeClaim.Status.InstanceID)
 	if err != nil {
+		var failedErr *cloudbursterrors.InstanceFailedError
+		if errors.As(err, &failedErr) {
+			logger.Error(err, "instance failed permanently")
+			metrics.NodeClaimPhaseTransitionsTotal.WithLabelValues(provider, string(nodeClaim.Status.Phase), string(cloudburstv1alpha1.NodeClaimPhaseFailed)).Inc()
+			r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InstanceFailed", err.Error())
+			r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error())
+			return ctrl.Result{}, nil
+		}
 		logger.Error(err, "unable to check instance status")
 		metrics.ProviderErrorsTotal.WithLabelValues(provider, "status").Inc()
 		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InstanceStatusCheckFailed", fmt.Sprintf("Failed to check instance status: %v", err))
@@ -685,7 +715,7 @@ func (r *NodeClaimReconciler) handleReady(ctx context.Context, nodeClaim *cloudb
 
 	node := &corev1.Node{}
 	if err := r.Get(ctx, types.NamespacedName{Name: nodeClaim.Status.NodeName}, node); err != nil {
-		if errors.IsNotFound(err) {
+		if k8serrors.IsNotFound(err) {
 			logger.Info("node no longer in cluster, initiating deletion",
 				"nodeName", nodeClaim.Status.NodeName,
 				"hint", "node may have left due to provider failure; NodeClaim will be cleaned up so NodePool can create a replacement",
@@ -911,7 +941,7 @@ func (r *NodeClaimReconciler) statusUpdateWithRetry(ctx context.Context, nodeCla
 	for attempt := 0; attempt < 3; attempt++ {
 		apply(nodeClaim)
 		if err := r.Status().Update(ctx, nodeClaim); err != nil {
-			if errors.IsConflict(err) && attempt < 2 {
+			if k8serrors.IsConflict(err) && attempt < 2 {
 				logger.V(1).Info("status update conflict, re-fetching and retrying", "attempt", attempt+1)
 				if err := r.Get(ctx, client.ObjectKeyFromObject(nodeClaim), nodeClaim); err != nil {
 					return err
