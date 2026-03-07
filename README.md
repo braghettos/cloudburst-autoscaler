@@ -62,7 +62,7 @@ graph TB
 2. `DemandDetector` detects the unschedulable pod and enqueues the `NodePool`.
 3. `NodePool` controller calculates required capacity and calls [CloudBroker](https://github.com/braghettos/cloudbroker) for the cheapest matching instance.
 4. A `NodeClaim` CR is created with the recommended instance details.
-5. `NodeClaim` controller provisions a VM on the selected provider (GCP, Scaleway, Hetzner, DigitalOcean, OVH, AWS, or Azure).
+5. `NodeClaim` controller provisions a VM on the selected provider (GCP, Scaleway, Hetzner, DigitalOcean, OVH, AWS, Azure, Aruba, or Seeweb).
 6. The VM runs a cloud-init script that installs containerd, kubelet, kubeadm, joins Tailscale, and runs `kubeadm join`.
 7. Once the node reports `Ready`, the pending pod is scheduled onto it.
 
@@ -76,7 +76,7 @@ graph TB
 
 | Aspect | Cloudburst | Karpenter | Cluster Autoscaler |
 |--------|------------|-----------|--------------------|
-| **Provider scope** | Multi-cloud (GCP, AWS, Azure, Hetzner, Scaleway, DigitalOcean, OVH) | Primarily AWS (EKS) | Per-provider (node groups) |
+| **Provider scope** | Multi-cloud (GCP, AWS, Azure, Hetzner, Scaleway, DigitalOcean, OVH, Aruba, Seeweb) | Primarily AWS (EKS) | Per-provider (node groups) |
 | **Cost selection** | Cheapest instance across providers (via [CloudBroker](https://github.com/braghettos/cloudbroker)) | Spot/preemptible within same cloud | Resize existing node groups |
 | **Cross-cloud burst** | Yes — e.g. EKS control plane, Hetzner burst nodes (Tailscale) | No — nodes in same cloud as cluster | No — scales node groups in-place |
 
@@ -95,7 +95,7 @@ Cloudburst is built for multi-cloud cost optimisation and cross-cloud burst. If 
 
 ## Features
 
-- **Multi-provider** &mdash; GCP Compute Engine, Scaleway, Hetzner Cloud, DigitalOcean, OVH Cloud, AWS EC2, Azure VM
+- **Multi-provider** &mdash; GCP Compute Engine, Scaleway, Hetzner Cloud, DigitalOcean, OVH Cloud, AWS EC2, Azure VM, Aruba Cloud, Seeweb
 - **Cost-optimised** &mdash; CloudBroker picks the cheapest instance across all configured providers
 - **Automatic lifecycle** &mdash; full scale-up and scale-down without manual intervention
 - **Tailscale networking** &mdash; VMs join the cluster over a private Tailscale mesh (works with Kind, EKS, GKE, etc.)
@@ -107,7 +107,7 @@ Cloudburst is built for multi-cloud cost optimisation and cross-cloud burst. If 
 | CRD | Purpose |
 |-----|---------|
 | **NodePool** | Scaling policy: instance requirements (CPU, RAM, price, arch, allowed providers), limits (min/max nodes), disruption settings (TTL after empty, TTL until expired). |
-| **NodeClass** | Infrastructure config: provider credentials and settings (GCP, Scaleway, Hetzner, DigitalOcean, OVH, AWS, Azure), cluster join config, Tailscale auth, Kubernetes version. Region/zone for provisioning comes from the CloudBroker recommendation; provider region/zone in NodeClass is optional. |
+| **NodeClass** | Infrastructure config: provider credentials and settings (GCP, Scaleway, Hetzner, DigitalOcean, OVH, AWS, Azure, Aruba, Seeweb), cluster join config, Tailscale auth, Kubernetes version. Region/zone for provisioning comes from the CloudBroker recommendation; provider region/zone in NodeClass is optional. |
 | **NodeClaim** | Represents a single provisioned node. Created automatically by the NodePool controller. Lifecycle: `Pending` &rarr; `Provisioning` &rarr; `Joining` &rarr; `Ready` &rarr; `Deleting`. |
 
 ### Controllers
@@ -138,7 +138,7 @@ cb-<nodepool-name>-<random-suffix>
 | Language | Go 1.24+ |
 | Framework | controller-runtime (Kubebuilder) |
 | CRDs | NodePool, NodeClass, NodeClaim |
-| Cloud SDKs | google-cloud-go, scaleway-sdk-go, hcloud-go, godo (DigitalOcean), go-ovh (OVH), aws-sdk-go-v2 (AWS), azure-sdk-for-go (Azure) |
+| Cloud SDKs | google-cloud-go, scaleway-sdk-go, hcloud-go, godo (DigitalOcean), go-ovh (OVH), aws-sdk-go-v2 (AWS), azure-sdk-for-go (Azure), Aruba HTTP API, Seeweb HTTP API |
 | Networking | Tailscale |
 | Bootstrap | kubeadm + cloud-init |
 | Containerisation | Docker |
@@ -232,6 +232,7 @@ Or from the UI repo: `cd ../cloudburst-autoscaler-ui && make run`. For in-cluste
 ./hack/integration-test-e2e-scaleway.sh
 ./hack/integration-test-e2e-aws.sh
 ./hack/integration-test-e2e-azure.sh
+./hack/integration-test-e2e-aruba.sh
 
 # All-providers: full E2E in one Kind cluster with all enabled providers from .env
 ./hack/integration-test-e2e-all-providers.sh
@@ -268,6 +269,8 @@ Or from the UI repo: `cd ../cloudburst-autoscaler-ui && make run`. For in-cluste
 │   ├── ovh/                         # OVH Cloud provisioner
 │   ├── aws/                         # AWS EC2 provisioner
 │   ├── azure/                       # Azure VM provisioner
+│   ├── aruba/                       # Aruba Cloud provisioner
+│   ├── seeweb/                      # Seeweb provisioner
 │   ├── planner/                     # Capacity planning utilities
 │   ├── metrics/                     # Prometheus metrics
 │   └── tailscale/                   # Tailscale API client
@@ -321,6 +324,8 @@ data:
 | `ovh-api-credentials` | `OVH_APPLICATION_KEY`, `OVH_APPLICATION_SECRET`, `OVH_CONSUMER_KEY` | OVH API credentials |
 | `aws-credentials` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | AWS IAM credentials |
 | `azure-credentials` | `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` | Azure Service Principal |
+| `aruba-api-credentials` | `ARUBA_API_KEY`, `ARUBA_API_SECRET` | Aruba Cloud API key (application key + secret) |
+| `seeweb-credentials` | `SEEWEB_USERNAME`, `SEEWEB_PASSWORD` | Seeweb credentials |
 
 ### Environment Variables (local development)
 
@@ -336,6 +341,8 @@ data:
 | `OVH_APPLICATION_KEY`, `OVH_APPLICATION_SECRET`, `OVH_CONSUMER_KEY`, `OVH_PROJECT_ID` | OVH only | OVH API credentials |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `AWS_AMI` | AWS only | AWS EC2 credentials (IAM user needs EC2 permissions) |
 | `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, `AZURE_SUBNET_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` | Azure only | Azure Service Principal and resource IDs |
+| `ARUBA_PROJECT_ID`, `ARUBA_API_KEY`, `ARUBA_API_SECRET` | Aruba only | Aruba Cloud project ID and API credentials |
+| `SEEWEB_USERNAME`, `SEEWEB_PASSWORD` | Seeweb only | Seeweb credentials |
 
 ### Example Resources
 

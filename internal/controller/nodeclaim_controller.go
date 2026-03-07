@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -1122,17 +1121,6 @@ func recommendationRequestFromSummary(s *cloudburstv1alpha1.RecommendationReques
 		EstimatedEgressGbPerHour: s.EstimatedEgressGbPerHour,
 		MaxTCOEurPerHour:         s.MaxTCOEurPerHour,
 	}
-}
-
-// sortAlternativesByVCPUAsc sorts InstanceDetails by VCPU ascending.
-// Used when VcpuLimitExceeded to try smaller instance types first.
-func sortAlternativesByVCPUAsc(alt []cloudburstv1alpha1.InstanceDetails) []cloudburstv1alpha1.InstanceDetails {
-	sorted := make([]cloudburstv1alpha1.InstanceDetails, len(alt))
-	copy(sorted, alt)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].VCPU < sorted[j].VCPU
-	})
-	return sorted
 }
 
 // recordEvent records a Kubernetes event
