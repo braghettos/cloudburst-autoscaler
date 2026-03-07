@@ -162,128 +162,128 @@ func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			logger.Info("skipping NodeClaim creation: would exceed maxNodes", "activeCount", activeCount, "maxNodes", maxNodes)
 		} else {
 			logger.Info("creating node claims",
-			"nodesToCreate", nodesToCreate,
-			"nodePool", req.Name,
-		)
+				"nodesToCreate", nodesToCreate,
+				"nodePool", req.Name,
+			)
 
-		// Get CloudBroker recommendation first to determine provider
-		// This allows us to match NodeClass to the provider
-		// Architecture is extracted from pod requirements (nodeSelector/nodeAffinity)
-		// If no architecture requirement is found in pods, pass empty string to CloudBroker
-		// (CloudBroker will handle the default or any-arch recommendation)
-		minVCPU := vcpuFromDemand(desiredCapacity.CPUMilliTotal, getMinVCPUFromNodePool(nodePool))
-		minRAMGb := ramGbFromDemand(desiredCapacity.MemBytesTotal, getMinRAMGbFromNodePool(nodePool))
+			// Get CloudBroker recommendation first to determine provider
+			// This allows us to match NodeClass to the provider
+			// Architecture is extracted from pod requirements (nodeSelector/nodeAffinity)
+			// If no architecture requirement is found in pods, pass empty string to CloudBroker
+			// (CloudBroker will handle the default or any-arch recommendation)
+			minVCPU := vcpuFromDemand(desiredCapacity.CPUMilliTotal, getMinVCPUFromNodePool(nodePool))
+			minRAMGb := ramGbFromDemand(desiredCapacity.MemBytesTotal, getMinRAMGbFromNodePool(nodePool))
 
-		brokerReq := cloudbroker.RecommendationRequest{
-			MinVCPU:            minVCPU,
-			MinRAMGb:           minRAMGb,
-			RegionConstraint:   nodePool.Spec.Requirements.RegionConstraint,
-			MaxPriceEurPerHour: nodePool.Spec.Requirements.MaxPriceEurPerHour,
-			Limit:              10,
-		}
-		// Set Arch: prefer pod's architecture requirement, fall back to first entry in NodePool.Spec.Requirements.Arch
-		// CloudBroker will normalize Kubernetes values (amd64, x86_64, arm64, aarch64) to canonical values
-		if desiredCapacity.Arch != "" {
-			brokerReq.Arch = &desiredCapacity.Arch
-		} else if len(nodePool.Spec.Requirements.Arch) > 0 {
-			brokerReq.Arch = &nodePool.Spec.Requirements.Arch[0]
-		}
-		if len(nodePool.Spec.Requirements.AllowedProviders) > 0 {
-			brokerReq.AllowedProviders = nodePool.Spec.Requirements.AllowedProviders
-		}
-		if nodePool.Spec.Requirements.TCOPlacement != nil {
-			brokerReq.DataSourceProvider = nodePool.Spec.Requirements.TCOPlacement.DataSourceProvider
-			brokerReq.DataSourceRegion = nodePool.Spec.Requirements.TCOPlacement.DataSourceRegion
-			brokerReq.EstimatedEgressGbPerHour = nodePool.Spec.Requirements.TCOPlacement.EstimatedEgressGbPerHour
-			if nodePool.Spec.Requirements.TCOPlacement.MaxTCOEurPerHour > 0 {
-				brokerReq.MaxTCOEurPerHour = nodePool.Spec.Requirements.TCOPlacement.MaxTCOEurPerHour
+			brokerReq := cloudbroker.RecommendationRequest{
+				MinVCPU:            minVCPU,
+				MinRAMGb:           minRAMGb,
+				RegionConstraint:   nodePool.Spec.Requirements.RegionConstraint,
+				MaxPriceEurPerHour: nodePool.Spec.Requirements.MaxPriceEurPerHour,
+				Limit:              10,
 			}
-		}
-
-		recommendations, err := r.CloudBroker.Recommend(ctx, &brokerReq)
-		if err != nil {
-			logger.Error(err, "failed to get recommendation from CloudBroker")
-			r.recordEvent(nodePool, corev1.EventTypeWarning, "CloudBrokerError", fmt.Sprintf("Failed to get recommendation: %v", err))
-			// Requeue instead of returning error so we retry after a delay (e.g. CloudBroker may recover)
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-		}
-		if len(recommendations) == 0 {
-			err := fmt.Errorf("CloudBroker returned no recommendations")
-			logger.Error(err, "CloudBroker returned empty list")
-			r.recordEvent(nodePool, corev1.EventTypeWarning, "CloudBrokerError", err.Error())
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-		}
-		chosen := &recommendations[0]
-		alternatives := recommendations[1:]
-
-		// Log CloudBroker recommendations that will drive provisioning
-		logger.Info("CloudBroker recommendations",
-			"request", fmt.Sprintf("minVCPU=%d minRAMGb=%.1f regionConstraint=%q maxPrice=%.4f", brokerReq.MinVCPU, brokerReq.MinRAMGb, brokerReq.RegionConstraint, brokerReq.MaxPriceEurPerHour),
-			"chosen", fmt.Sprintf("%s/%s/%s (vcpu=%d ramGb=%.1f price=%.4f EUR/h)", chosen.Provider, chosen.Region, chosen.InstanceType, chosen.VCPU, chosen.RAMGb, chosen.PriceEurPerHour),
-			"alternativesCount", len(alternatives),
-		)
-		if chosen.Provider != "gcp" && chosen.Provider != "scaleway" && chosen.Provider != "hetzner" && chosen.Provider != "digitalocean" && chosen.Provider != "ovh" && chosen.Provider != "aws" && chosen.Provider != "azure" && chosen.Provider != "aruba" {
-			err := fmt.Errorf("recommendation provider is %q, only gcp, scaleway, hetzner, digitalocean, ovh, aws, azure, and aruba are supported", chosen.Provider)
-			logger.Error(err, "unsupported provider")
-			r.recordEvent(nodePool, corev1.EventTypeWarning, "UnsupportedProvider", err.Error())
-			return ctrl.Result{}, err
-		}
-
-		// Get NodeClass matching the provider from recommendation
-		nodeClassList := &cloudburstv1alpha1.NodeClassList{}
-		if err := r.List(ctx, nodeClassList, client.InNamespace(req.Namespace)); err != nil {
-			logger.Error(err, "unable to list NodeClasses")
-			return ctrl.Result{}, err
-		}
-
-		if len(nodeClassList.Items) == 0 {
-			logger.Info("no NodeClass found, skipping NodeClaim creation")
-			r.recordEvent(nodePool, corev1.EventTypeWarning, "NoNodeClass", "No NodeClass found in namespace")
-			return ctrl.Result{}, nil
-		}
-
-		// Find NodeClass that matches the provider
-		var nodeClass *cloudburstv1alpha1.NodeClass
-		for i := range nodeClassList.Items {
-			nc := &nodeClassList.Items[i]
-			if r.nodeClassSupportsProvider(nc, chosen.Provider) {
-				nodeClass = nc
-				logger.Info("matched NodeClass to provider",
-					"nodeClass", nc.Name,
-					"provider", chosen.Provider,
-				)
-				break
+			// Set Arch: prefer pod's architecture requirement, fall back to first entry in NodePool.Spec.Requirements.Arch
+			// CloudBroker will normalize Kubernetes values (amd64, x86_64, arm64, aarch64) to canonical values
+			if desiredCapacity.Arch != "" {
+				brokerReq.Arch = &desiredCapacity.Arch
+			} else if len(nodePool.Spec.Requirements.Arch) > 0 {
+				brokerReq.Arch = &nodePool.Spec.Requirements.Arch[0]
 			}
-		}
-
-		if nodeClass == nil {
-			err := fmt.Errorf("no NodeClass found that supports provider %q", chosen.Provider)
-			logger.Error(err, "no matching NodeClass")
-			r.recordEvent(nodePool, corev1.EventTypeWarning, "NoMatchingNodeClass", err.Error())
-			return ctrl.Result{}, err
-		}
-
-		// Patch pods without provider/nodepool constraint so they land on the node we're about to provision.
-		// This ensures workloads without nodeAffinity are bound to the chosen provider.
-		if err := r.patchPodsWithProviderAffinity(ctx, chosen.Provider, logger); err != nil {
-			logger.Error(err, "failed to patch pods with provider affinity")
-			// Don't block NodeClaim creation; pods may still schedule correctly
-		}
-
-		// Create NodeClaims using the matched NodeClass (chosen + alternatives for fallback on create failure)
-		for i := int32(0); i < nodesToCreate; i++ {
-			if err := r.createNodeClaim(ctx, nodePool, nodeClass, desiredCapacity, &brokerReq, chosen, alternatives); err != nil {
-				logger.Error(err, "unable to create NodeClaim", "index", i)
-				r.recordEvent(nodePool, corev1.EventTypeWarning, "NodeClaimCreationFailed", fmt.Sprintf("Failed to create NodeClaim: %v", err))
-				continue
+			if len(nodePool.Spec.Requirements.AllowedProviders) > 0 {
+				brokerReq.AllowedProviders = nodePool.Spec.Requirements.AllowedProviders
 			}
-			metrics.ScaleEventsTotal.WithLabelValues("scale_up", chosen.Provider).Inc()
-		}
+			if nodePool.Spec.Requirements.TCOPlacement != nil {
+				brokerReq.DataSourceProvider = nodePool.Spec.Requirements.TCOPlacement.DataSourceProvider
+				brokerReq.DataSourceRegion = nodePool.Spec.Requirements.TCOPlacement.DataSourceRegion
+				brokerReq.EstimatedEgressGbPerHour = nodePool.Spec.Requirements.TCOPlacement.EstimatedEgressGbPerHour
+				if nodePool.Spec.Requirements.TCOPlacement.MaxTCOEurPerHour > 0 {
+					brokerReq.MaxTCOEurPerHour = nodePool.Spec.Requirements.TCOPlacement.MaxTCOEurPerHour
+				}
+			}
 
-		r.recordEvent(nodePool, corev1.EventTypeNormal, "NodeClaimsCreated", fmt.Sprintf("Created %d NodeClaim(s)", nodesToCreate))
-		// Requeue so next reconciliation sees updated activeCount. Use a delay so the informer
-		// cache is likely to include the new NodeClaim(s) before we consider creating more.
-		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+			recommendations, err := r.CloudBroker.Recommend(ctx, &brokerReq)
+			if err != nil {
+				logger.Error(err, "failed to get recommendation from CloudBroker")
+				r.recordEvent(nodePool, corev1.EventTypeWarning, "CloudBrokerError", fmt.Sprintf("Failed to get recommendation: %v", err))
+				// Requeue instead of returning error so we retry after a delay (e.g. CloudBroker may recover)
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+			if len(recommendations) == 0 {
+				err := fmt.Errorf("CloudBroker returned no recommendations")
+				logger.Error(err, "CloudBroker returned empty list")
+				r.recordEvent(nodePool, corev1.EventTypeWarning, "CloudBrokerError", err.Error())
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+			chosen := &recommendations[0]
+			alternatives := recommendations[1:]
+
+			// Log CloudBroker recommendations that will drive provisioning
+			logger.Info("CloudBroker recommendations",
+				"request", fmt.Sprintf("minVCPU=%d minRAMGb=%.1f regionConstraint=%q maxPrice=%.4f", brokerReq.MinVCPU, brokerReq.MinRAMGb, brokerReq.RegionConstraint, brokerReq.MaxPriceEurPerHour),
+				"chosen", fmt.Sprintf("%s/%s/%s (vcpu=%d ramGb=%.1f price=%.4f EUR/h)", chosen.Provider, chosen.Region, chosen.InstanceType, chosen.VCPU, chosen.RAMGb, chosen.PriceEurPerHour),
+				"alternativesCount", len(alternatives),
+			)
+			if chosen.Provider != "gcp" && chosen.Provider != "scaleway" && chosen.Provider != "hetzner" && chosen.Provider != "digitalocean" && chosen.Provider != "ovh" && chosen.Provider != "aws" && chosen.Provider != "azure" && chosen.Provider != "aruba" {
+				err := fmt.Errorf("recommendation provider is %q, only gcp, scaleway, hetzner, digitalocean, ovh, aws, azure, and aruba are supported", chosen.Provider)
+				logger.Error(err, "unsupported provider")
+				r.recordEvent(nodePool, corev1.EventTypeWarning, "UnsupportedProvider", err.Error())
+				return ctrl.Result{}, err
+			}
+
+			// Get NodeClass matching the provider from recommendation
+			nodeClassList := &cloudburstv1alpha1.NodeClassList{}
+			if err := r.List(ctx, nodeClassList, client.InNamespace(req.Namespace)); err != nil {
+				logger.Error(err, "unable to list NodeClasses")
+				return ctrl.Result{}, err
+			}
+
+			if len(nodeClassList.Items) == 0 {
+				logger.Info("no NodeClass found, skipping NodeClaim creation")
+				r.recordEvent(nodePool, corev1.EventTypeWarning, "NoNodeClass", "No NodeClass found in namespace")
+				return ctrl.Result{}, nil
+			}
+
+			// Find NodeClass that matches the provider
+			var nodeClass *cloudburstv1alpha1.NodeClass
+			for i := range nodeClassList.Items {
+				nc := &nodeClassList.Items[i]
+				if r.nodeClassSupportsProvider(nc, chosen.Provider) {
+					nodeClass = nc
+					logger.Info("matched NodeClass to provider",
+						"nodeClass", nc.Name,
+						"provider", chosen.Provider,
+					)
+					break
+				}
+			}
+
+			if nodeClass == nil {
+				err := fmt.Errorf("no NodeClass found that supports provider %q", chosen.Provider)
+				logger.Error(err, "no matching NodeClass")
+				r.recordEvent(nodePool, corev1.EventTypeWarning, "NoMatchingNodeClass", err.Error())
+				return ctrl.Result{}, err
+			}
+
+			// Patch pods without provider/nodepool constraint so they land on the node we're about to provision.
+			// This ensures workloads without nodeAffinity are bound to the chosen provider.
+			if err := r.patchPodsWithProviderAffinity(ctx, chosen.Provider, logger); err != nil {
+				logger.Error(err, "failed to patch pods with provider affinity")
+				// Don't block NodeClaim creation; pods may still schedule correctly
+			}
+
+			// Create NodeClaims using the matched NodeClass (chosen + alternatives for fallback on create failure)
+			for i := int32(0); i < nodesToCreate; i++ {
+				if err := r.createNodeClaim(ctx, nodePool, nodeClass, desiredCapacity, &brokerReq, chosen, alternatives); err != nil {
+					logger.Error(err, "unable to create NodeClaim", "index", i)
+					r.recordEvent(nodePool, corev1.EventTypeWarning, "NodeClaimCreationFailed", fmt.Sprintf("Failed to create NodeClaim: %v", err))
+					continue
+				}
+				metrics.ScaleEventsTotal.WithLabelValues("scale_up", chosen.Provider).Inc()
+			}
+
+			r.recordEvent(nodePool, corev1.EventTypeNormal, "NodeClaimsCreated", fmt.Sprintf("Created %d NodeClaim(s)", nodesToCreate))
+			// Requeue so next reconciliation sees updated activeCount. Use a delay so the informer
+			// cache is likely to include the new NodeClaim(s) before we consider creating more.
+			return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 		}
 	}
 
@@ -711,15 +711,15 @@ func brokerReqToSummary(req *cloudbroker.RecommendationRequest) *cloudburstv1alp
 		return nil
 	}
 	s := &cloudburstv1alpha1.RecommendationRequestSummary{
-		MinVCPU:            req.MinVCPU,
-		MinRAMGb:           req.MinRAMGb,
-		RegionConstraint:   req.RegionConstraint,
-		MaxPriceEurPerHour: req.MaxPriceEurPerHour,
-		AllowedProviders:  append([]string(nil), req.AllowedProviders...),
-		DataSourceProvider: req.DataSourceProvider,
-		DataSourceRegion:   req.DataSourceRegion,
+		MinVCPU:                  req.MinVCPU,
+		MinRAMGb:                 req.MinRAMGb,
+		RegionConstraint:         req.RegionConstraint,
+		MaxPriceEurPerHour:       req.MaxPriceEurPerHour,
+		AllowedProviders:         append([]string(nil), req.AllowedProviders...),
+		DataSourceProvider:       req.DataSourceProvider,
+		DataSourceRegion:         req.DataSourceRegion,
 		EstimatedEgressGbPerHour: req.EstimatedEgressGbPerHour,
-		MaxTCOEurPerHour:   req.MaxTCOEurPerHour,
+		MaxTCOEurPerHour:         req.MaxTCOEurPerHour,
 	}
 	if req.Arch != nil {
 		s.Arch = *req.Arch
@@ -788,8 +788,8 @@ func (r *NodePoolReconciler) createNodeClaim(ctx context.Context, nodePool *clou
 			},
 		},
 		Spec: cloudburstv1alpha1.NodeClaimSpec{
-			NodePoolRef:          nodePool.Name,
-			NodeClassRef:         nodeClass.Name,
+			NodePoolRef:  nodePool.Name,
+			NodeClassRef: nodeClass.Name,
 			Chosen: cloudburstv1alpha1.InstanceDetails{
 				Provider:        chosen.Provider,
 				Region:          chosen.Region,

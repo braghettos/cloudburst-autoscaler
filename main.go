@@ -115,13 +115,13 @@ func main() {
 	}
 
 	if err = (&controller.NodeClaimReconciler{
-		Client:       mgr.GetClient(),
-		Scheme:       mgr.GetScheme(),
-		Recorder:     mgr.GetEventRecorderFor("nodeclaim-controller"),
-		Clientset:    clientset,
-		RestConfig:   mgr.GetConfig(),
-		Config:       controller.LoadConfig(),
-		CloudBroker:  cloudBrokerClient,
+		Client:      mgr.GetClient(),
+		Scheme:      mgr.GetScheme(),
+		Recorder:    mgr.GetEventRecorderFor("nodeclaim-controller"),
+		Clientset:   clientset,
+		RestConfig:  mgr.GetConfig(),
+		Config:      controller.LoadConfig(),
+		CloudBroker: cloudBrokerClient,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NodeClaim")
 		os.Exit(1)

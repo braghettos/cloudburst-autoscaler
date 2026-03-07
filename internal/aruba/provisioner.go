@@ -266,8 +266,8 @@ func (p *Provisioner) ensureNetwork(ctx context.Context, location string) (vpcUR
 	var vpcList struct {
 		Values []struct {
 			Metadata *struct {
-				Name   *string `json:"name"`
-				URI    *string `json:"uri"`
+				Name     *string `json:"name"`
+				URI      *string `json:"uri"`
 				Location *struct {
 					Value string `json:"value"`
 				} `json:"location"`
@@ -400,7 +400,7 @@ func (p *Provisioner) getVPCSubnetAndSG(ctx context.Context, vpcURI, location st
 	}
 	if sgURI == "" {
 		sgReq := map[string]interface{}{
-			"metadata": map[string]interface{}{"name": "cloudburst-default-sg"},
+			"metadata":   map[string]interface{}{"name": "cloudburst-default-sg"},
 			"properties": map[string]interface{}{"default": true},
 		}
 		resp, body, err = p.do(ctx, "POST", sgPath, sgReq)
@@ -604,9 +604,9 @@ func (p *Provisioner) ListInstances(ctx context.Context) ([]arubaInstanceInfo, e
 	var list struct {
 		Values []struct {
 			Metadata *struct {
-				ID     *string `json:"id"`
-				URI    *string `json:"uri"`
-				Name   *string `json:"name"`
+				ID       *string `json:"id"`
+				URI      *string `json:"uri"`
+				Name     *string `json:"name"`
 				Location *struct {
 					Value string `json:"value"`
 				} `json:"location"`
