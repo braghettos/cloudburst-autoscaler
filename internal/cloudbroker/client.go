@@ -35,8 +35,8 @@ const (
 	DefaultBaseURL = "http://localhost:8000"
 	// DefaultTimeoutSeconds is the default timeout in seconds
 	DefaultTimeoutSeconds = 5
-	// MaxRetries is the maximum number of retry attempts (1 initial + 1 retry = 2 attempts total)
-	MaxRetries = 1
+	// MaxRetries is the maximum number of retry attempts (1 initial + 3 retries = 4 attempts total)
+	MaxRetries = 3
 )
 
 // Client is the CloudBroker API client
@@ -61,6 +61,9 @@ type RecommendationRequest struct {
 	DataSourceRegion         string  `json:"data_source_region,omitempty"`
 	EstimatedEgressGbPerHour float64 `json:"estimated_egress_gb_per_hour,omitempty"`
 	MaxTCOEurPerHour         float64 `json:"max_tco_eur_per_hour,omitempty"`
+
+	// ExcludedInstanceTypes excludes instance types (e.g. after provisioning failure)
+	ExcludedInstanceTypes []string `json:"excluded_instance_types,omitempty"`
 }
 
 // RecommendationExplain is the nested explain object from CloudBroker (contains price and TCO breakdown)
@@ -128,8 +131,8 @@ func (c *Client) Recommend(ctx context.Context, req *RecommendationRequest) ([]R
 
 	for attempt := 0; attempt <= MaxRetries; attempt++ {
 		if attempt > 0 {
-			// Wait before retry (exponential backoff: 100ms, 200ms)
-			waitTime := time.Duration(attempt*100) * time.Millisecond
+			// Wait before retry (exponential backoff: 500ms, 1s, 2s)
+			waitTime := time.Duration(500*(1<<(attempt-1))) * time.Millisecond
 			select {
 			case <-ctx.Done():
 				return nil, fmt.Errorf("context cancelled: %w", ctx.Err())

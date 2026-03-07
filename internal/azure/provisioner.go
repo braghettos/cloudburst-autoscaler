@@ -254,8 +254,9 @@ func (p *Provisioner) createInstanceOnce(ctx context.Context, name, vmSize, star
 		return "", fmt.Errorf("failed waiting for NIC: %w", err)
 	}
 
-	// Image reference: default Ubuntu 22.04 if not specified
-	imageRef := parseImageReference(imageFromConfig)
+	// Image reference: default Ubuntu 22.04 if not specified.
+	// A-series VMs (e.g. Standard_A2_v2) only support Gen1; use 22_04-lts not 22_04-lts-gen2.
+	imageRef := parseImageReference(imageFromConfig, vmSize)
 
 	vmParams := armcompute.VirtualMachine{
 		Location: ptr(p.location),
@@ -268,7 +269,9 @@ func (p *Provisioner) createInstanceOnce(ctx context.Context, name, vmSize, star
 				OSDisk: &armcompute.OSDisk{
 					CreateOption: ptr(armcompute.DiskCreateOptionTypesFromImage),
 					ManagedDisk: &armcompute.ManagedDiskParameters{
-						StorageAccountType: ptr(armcompute.StorageAccountTypesPremiumLRS),
+						// Use Standard_LRS for broad VM size compatibility. Premium_LRS is not supported
+						// by A-series (e.g. Standard_A2_v2) and other Basic-tier sizes.
+						StorageAccountType: ptr(armcompute.StorageAccountTypesStandardLRS),
 					},
 					DiskSizeGB: ptr(int32(30)),
 				},
@@ -309,12 +312,18 @@ func (p *Provisioner) createInstanceOnce(ctx context.Context, name, vmSize, star
 	return fmt.Sprintf("%s%s/%s", InstanceIDPrefix, p.resourceGroup, name), nil
 }
 
-func parseImageReference(s string) *armcompute.ImageReference {
+func parseImageReference(s, vmSize string) *armcompute.ImageReference {
+	// A-series (Standard_A*) only supports Gen1; use 22_04-lts for compatibility.
+	useGen1 := strings.HasPrefix(strings.ToLower(vmSize), "standard_a")
+	defaultSKU := "22_04-lts-gen2"
+	if useGen1 {
+		defaultSKU = "22_04-lts"
+	}
 	if s == "" {
 		return &armcompute.ImageReference{
 			Publisher: ptr("Canonical"),
 			Offer:     ptr("0001-com-ubuntu-server-jammy"),
-			SKU:       ptr("22_04-lts-gen2"),
+			SKU:       ptr(defaultSKU),
 			Version:   ptr("latest"),
 		}
 	}
@@ -328,7 +337,11 @@ func parseImageReference(s string) *armcompute.ImageReference {
 		ref.Offer = &parts[1]
 	}
 	if len(parts) >= 3 && parts[2] != "" {
-		ref.SKU = &parts[2]
+		sku := parts[2]
+		if useGen1 && strings.Contains(strings.ToLower(sku), "gen2") {
+			sku = "22_04-lts"
+		}
+		ref.SKU = &sku
 	}
 	if len(parts) >= 4 && parts[3] != "" {
 		ref.Version = &parts[3]

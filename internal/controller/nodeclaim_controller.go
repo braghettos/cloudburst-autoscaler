@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -41,6 +42,7 @@ import (
 
 	cloudburstv1alpha1 "github.com/diegobraga/cloudburst-autoscaler/api/v1alpha1"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/bootstrap"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/cloudbroker"
 	cloudbursterrors "github.com/diegobraga/cloudburst-autoscaler/internal/errors"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/metrics"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/provisioner"
@@ -55,11 +57,17 @@ const (
 // NodeClaimReconciler reconciles a NodeClaim object
 type NodeClaimReconciler struct {
 	client.Client
-	Scheme     *runtime.Scheme
-	Recorder   record.EventRecorder
-	Clientset  kubernetes.Interface
-	RestConfig *rest.Config
-	Config     *ControllerConfig
+	Scheme      *runtime.Scheme
+	Recorder    record.EventRecorder
+	Clientset   kubernetes.Interface
+	RestConfig  *rest.Config
+	Config      *ControllerConfig
+	CloudBroker CloudBrokerClient
+}
+
+// CloudBrokerClient is the interface for fetching recommendations (used for retry on provisioning failure).
+type CloudBrokerClient interface {
+	Recommend(ctx context.Context, req *cloudbroker.RecommendationRequest) ([]cloudbroker.RecommendationResult, error)
 }
 
 //+kubebuilder:rbac:groups=cloudburst.io,resources=nodeclaims,verbs=get;list;watch;create;update;patch;delete
@@ -106,8 +114,10 @@ func (r *NodeClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	case cloudburstv1alpha1.NodeClaimPhaseDeleting:
 		return r.handleDeleting(ctx, nodeClaim, logger)
 	case cloudburstv1alpha1.NodeClaimPhaseFailed:
-		// Failed state, don't retry automatically
-		return ctrl.Result{}, nil
+		return r.handleFailed(ctx, nodeClaim, logger)
+	case cloudburstv1alpha1.NodeClaimPhaseQuotaExceeded:
+		// Quota exceeded (e.g. AWS VcpuLimitExceeded): retry provisioning periodically
+		return r.handleQuotaExceeded(ctx, nodeClaim, logger)
 	default:
 		// Unknown phase, set to Pending. Retry on conflict (NodePool may have just created this NodeClaim).
 		logger.Info("unknown phase, setting to Pending", "phase", nodeClaim.Status.Phase)
@@ -122,6 +132,63 @@ func (r *NodeClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		return ctrl.Result{}, nil
 	}
+}
+
+// handleFailed handles NodeClaims in Failed phase. When a replacement NodeClaim exists
+// for the same NodePool (created because Failed NodeClaims are excluded from activeCount),
+// this failed NodeClaim is deleted so the cloud instance is cleaned up and the UI no longer
+// shows stale failed claims.
+func (r *NodeClaimReconciler) handleFailed(ctx context.Context, nodeClaim *cloudburstv1alpha1.NodeClaim, logger logr.Logger) (ctrl.Result, error) {
+	if nodeClaim.Spec.NodePoolRef == "" {
+		return ctrl.Result{}, nil
+	}
+
+	nodeClaimList := &cloudburstv1alpha1.NodeClaimList{}
+	if err := r.List(ctx, nodeClaimList, client.InNamespace(nodeClaim.Namespace)); err != nil {
+		logger.Error(err, "unable to list NodeClaims for NodePool")
+		return ctrl.Result{}, err
+	}
+
+	for i := range nodeClaimList.Items {
+		other := &nodeClaimList.Items[i]
+		if other.Name == nodeClaim.Name {
+			continue
+		}
+		if other.Spec.NodePoolRef != nodeClaim.Spec.NodePoolRef {
+			continue
+		}
+		if other.Status.Phase == cloudburstv1alpha1.NodeClaimPhaseFailed {
+			continue
+		}
+		// Found an active replacement (Pending, Provisioning, Joining, Ready, Deleting, QuotaExceeded)
+		logger.Info("deleting failed NodeClaim: replacement exists",
+			"replacement", other.Name,
+			"replacementPhase", other.Status.Phase,
+		)
+		r.recordEvent(nodeClaim, corev1.EventTypeNormal, "ReplacementExists", fmt.Sprintf("Deleting failed NodeClaim; replacement %s is %s", other.Name, other.Status.Phase))
+		if err := r.Delete(ctx, nodeClaim); err != nil {
+			logger.Error(err, "failed to delete failed NodeClaim")
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
+	return ctrl.Result{}, nil
+}
+
+// handleQuotaExceeded handles NodeClaims in QuotaExceeded phase.
+// Transitions to Pending to retry provisioning (user may have fixed the quota).
+func (r *NodeClaimReconciler) handleQuotaExceeded(ctx context.Context, nodeClaim *cloudburstv1alpha1.NodeClaim, logger logr.Logger) (ctrl.Result, error) {
+	logger.Info("retrying provisioning after quota exceeded", "nodeClaim", nodeClaim.Name, "lastError", nodeClaim.Status.LastError)
+	apply := func(nc *cloudburstv1alpha1.NodeClaim) {
+		nc.Status.Phase = cloudburstv1alpha1.NodeClaimPhasePending
+		nc.Status.Timestamps.LastTransition = metav1.Now()
+		// Keep LastError for visibility until we succeed
+	}
+	if err := r.statusUpdateWithRetry(ctx, nodeClaim, apply, logger); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{Requeue: true}, nil
 }
 
 // handlePending handles NodeClaims in Pending phase
@@ -266,7 +333,14 @@ func (r *NodeClaimReconciler) handlePending(ctx context.Context, nodeClaim *clou
 	if err != nil {
 		logger.Error(err, "failed to create instance")
 		metrics.ProviderErrorsTotal.WithLabelValues(provider, "create").Inc()
-		// If we have alternatives, try the next recommendation instead of failing
+		// VcpuLimitExceeded: write error to status, stop creating new NodeClaims, retry periodically
+		if cloudbursterrors.IsVcpuLimitExceeded(err) {
+			metrics.NodeClaimPhaseTransitionsTotal.WithLabelValues(provider, string(nodeClaim.Status.Phase), string(cloudburstv1alpha1.NodeClaimPhaseQuotaExceeded)).Inc()
+			r.recordEvent(nodeClaim, corev1.EventTypeWarning, "QuotaExceeded", fmt.Sprintf("Cloud provider quota exceeded: %v. Will retry when limit is fixed.", err))
+			r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseQuotaExceeded, err.Error())
+			return ctrl.Result{RequeueAfter: 2 * time.Minute}, nil
+		}
+		// Other errors: try alternatives if available
 		if len(nodeClaim.Spec.Alternatives) > 0 {
 			next := nodeClaim.Spec.Alternatives[0]
 			remaining := nodeClaim.Spec.Alternatives[1:]
@@ -286,6 +360,53 @@ func (r *NodeClaimReconciler) handlePending(ctx context.Context, nodeClaim *clou
 				return ctrl.Result{}, err
 			}
 			return ctrl.Result{Requeue: true}, nil
+		}
+		// No alternatives: fetch new recommendations from CloudBroker excluding the failed instance type
+		if r.CloudBroker != nil && nodeClaim.Spec.RecommendationRequest != nil {
+			brokerReq := recommendationRequestFromSummary(nodeClaim.Spec.RecommendationRequest)
+			brokerReq.ExcludedInstanceTypes = []string{nodeClaim.Spec.Chosen.InstanceType}
+			brokerReq.Limit = 10
+			recommendations, fetchErr := r.CloudBroker.Recommend(ctx, brokerReq)
+			if fetchErr == nil && len(recommendations) > 0 {
+				next := recommendations[0]
+				remaining := recommendations[1:]
+				logger.Info("fetching new CloudBroker recommendations after provisioning failure",
+					"failedInstanceType", nodeClaim.Spec.Chosen.InstanceType,
+					"next", next.InstanceType,
+					"nextProvider", next.Provider,
+					"remaining", len(remaining),
+				)
+				r.recordEvent(nodeClaim, corev1.EventTypeNormal, "InstanceCreationFallback", fmt.Sprintf("Create failed (%v), trying new recommendation: %s/%s", err, next.Provider, next.InstanceType))
+				original := nodeClaim.DeepCopy()
+				nodeClaim.Spec.Chosen = cloudburstv1alpha1.InstanceDetails{
+					Provider:        next.Provider,
+					Region:          next.Region,
+					InstanceType:    next.InstanceType,
+					VCPU:            next.VCPU,
+					RamGb:           next.RAMGb,
+					PriceEurPerHour: next.PriceEurPerHour,
+				}
+				nodeClaim.Spec.Alternatives = make([]cloudburstv1alpha1.InstanceDetails, 0, len(remaining))
+				for _, a := range remaining {
+					nodeClaim.Spec.Alternatives = append(nodeClaim.Spec.Alternatives, cloudburstv1alpha1.InstanceDetails{
+						Provider:        a.Provider,
+						Region:          a.Region,
+						InstanceType:    a.InstanceType,
+						VCPU:            a.VCPU,
+						RamGb:           a.RAMGb,
+						PriceEurPerHour: a.PriceEurPerHour,
+					})
+				}
+				if err := r.Patch(ctx, nodeClaim, client.MergeFrom(original)); err != nil {
+					logger.Error(err, "failed to patch NodeClaim with new recommendation")
+					r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error())
+					return ctrl.Result{}, err
+				}
+				return ctrl.Result{Requeue: true}, nil
+			}
+			if fetchErr != nil {
+				logger.V(1).Info("CloudBroker retry fetch failed, marking as Failed", "err", fetchErr)
+			}
 		}
 		metrics.NodeClaimPhaseTransitionsTotal.WithLabelValues(provider, string(nodeClaim.Status.Phase), string(cloudburstv1alpha1.NodeClaimPhaseFailed)).Inc()
 		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InstanceCreationFailed", fmt.Sprintf("Failed to create instance: %v", err))
@@ -837,6 +958,20 @@ func (r *NodeClaimReconciler) getTailscaleAuthKey(ctx context.Context, nodeClaim
 	return authKey, nil
 }
 
+// isInstanceNotFoundError returns true if the error indicates the instance was already deleted (404/not found).
+// Treating this as success allows idempotent delete: instance is gone, proceed with finalizer removal.
+func isInstanceNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "404") ||
+		strings.Contains(s, "not found") ||
+		strings.Contains(s, "was not found") ||
+		strings.Contains(s, "could not be found") ||
+		strings.Contains(s, "does not exist")
+}
+
 // handleDeletion handles NodeClaim deletion (when user deletes the CR; DeletionTimestamp is set).
 // Uses the provider-agnostic factory so that instances from any provider are cleaned up.
 func (r *NodeClaimReconciler) handleDeletion(ctx context.Context, nodeClaim *cloudburstv1alpha1.NodeClaim, logger logr.Logger) (ctrl.Result, error) {
@@ -868,10 +1003,16 @@ func (r *NodeClaimReconciler) handleDeletion(ctx context.Context, nodeClaim *clo
 				} else {
 					defer prov.Close()
 					if err := prov.DeleteInstance(ctx, nodeClaim.Status.InstanceID); err != nil {
-						metrics.ProviderErrorsTotal.WithLabelValues(provider, "delete").Inc()
-						logger.Error(err, "failed to delete instance", "instanceID", nodeClaim.Status.InstanceID, "provider", provider)
-						r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InstanceDeletionFailed", fmt.Sprintf("Failed to delete %s instance: %v", provider, err))
-						// Don't fail deletion if instance deletion fails
+						if isInstanceNotFoundError(err) {
+							logger.Info("instance already deleted (404/not found), treating as success",
+								"instanceID", nodeClaim.Status.InstanceID, "provider", provider)
+							r.recordEvent(nodeClaim, corev1.EventTypeNormal, "InstanceDeleted", fmt.Sprintf("%s instance already gone: %s", provider, nodeClaim.Status.InstanceID))
+						} else {
+							metrics.ProviderErrorsTotal.WithLabelValues(provider, "delete").Inc()
+							logger.Error(err, "failed to delete instance", "instanceID", nodeClaim.Status.InstanceID, "provider", provider)
+							r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InstanceDeletionFailed", fmt.Sprintf("Failed to delete %s instance: %v", provider, err))
+						}
+						// Continue with finalizer removal for non-Aruba-state errors (don't block scale-down)
 					} else {
 						logger.Info("deleted instance", "instanceID", nodeClaim.Status.InstanceID, "provider", provider)
 						r.recordEvent(nodeClaim, corev1.EventTypeNormal, "InstanceDeleted", fmt.Sprintf("%s instance deleted: %s", provider, nodeClaim.Status.InstanceID))
@@ -963,6 +1104,41 @@ func (r *NodeClaimReconciler) updateStatus(ctx context.Context, nodeClaim *cloud
 	if err := r.Status().Update(ctx, nodeClaim); err != nil {
 		log.FromContext(ctx).Error(err, "failed to update NodeClaim status", "phase", phase)
 	}
+}
+
+// recommendationRequestFromSummary converts NodeClaim RecommendationRequestSummary to CloudBroker request.
+func recommendationRequestFromSummary(s *cloudburstv1alpha1.RecommendationRequestSummary) *cloudbroker.RecommendationRequest {
+	if s == nil {
+		return nil
+	}
+	arch := s.Arch
+	if arch == "" {
+		arch = "x86_64" // default when not specified
+	}
+	return &cloudbroker.RecommendationRequest{
+		MinVCPU:                  s.MinVCPU,
+		MinRAMGb:                 s.MinRAMGb,
+		Arch:                     &arch,
+		RegionConstraint:         s.RegionConstraint,
+		MaxPriceEurPerHour:       s.MaxPriceEurPerHour,
+		Limit:                    10,
+		AllowedProviders:         append([]string(nil), s.AllowedProviders...),
+		DataSourceProvider:       s.DataSourceProvider,
+		DataSourceRegion:         s.DataSourceRegion,
+		EstimatedEgressGbPerHour: s.EstimatedEgressGbPerHour,
+		MaxTCOEurPerHour:         s.MaxTCOEurPerHour,
+	}
+}
+
+// sortAlternativesByVCPUAsc sorts InstanceDetails by VCPU ascending.
+// Used when VcpuLimitExceeded to try smaller instance types first.
+func sortAlternativesByVCPUAsc(alt []cloudburstv1alpha1.InstanceDetails) []cloudburstv1alpha1.InstanceDetails {
+	sorted := make([]cloudburstv1alpha1.InstanceDetails, len(alt))
+	copy(sorted, alt)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].VCPU < sorted[j].VCPU
+	})
+	return sorted
 }
 
 // recordEvent records a Kubernetes event

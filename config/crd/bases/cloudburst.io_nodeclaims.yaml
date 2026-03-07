@@ -122,6 +122,50 @@ spec:
               nodePoolRef:
                 description: NodePoolRef is a reference to the NodePool
                 type: string
+              recommendationRequest:
+                description: |-
+                  RecommendationRequest stores the CloudBroker request params for retry when provisioning fails.
+                  Set by NodePool when creating the NodeClaim; used by NodeClaim controller to fetch new recommendations.
+                properties:
+                  allowedProviders:
+                    description: AllowedProviders restricts to these providers
+                    items:
+                      type: string
+                    type: array
+                  arch:
+                    description: Arch is the architecture requirement (e.g. amd64,
+                      arm64)
+                    type: string
+                  dataSourceProvider:
+                    description: DataSourceProvider and DataSourceRegion are set when
+                      TCO placement is used
+                    type: string
+                  dataSourceRegion:
+                    type: string
+                  estimatedEgressGbPerHour:
+                    type: number
+                  maxPriceEurPerHour:
+                    description: MaxPriceEurPerHour is the maximum price per hour
+                      in EUR
+                    type: number
+                  maxTCOEurPerHour:
+                    type: number
+                  minRamGb:
+                    description: MinRAMGb is the minimum RAM in GB requested
+                    type: number
+                  minVcpu:
+                    description: MinVCPU is the minimum vCPU requested
+                    format: int32
+                    type: integer
+                  regionConstraint:
+                    description: RegionConstraint is the region constraint passed
+                      to CloudBroker
+                    type: string
+                required:
+                - maxPriceEurPerHour
+                - minRamGb
+                - minVcpu
+                type: object
             required:
             - chosen
             - nodeClassRef
@@ -148,6 +192,7 @@ spec:
                 - Ready
                 - Failed
                 - Deleting
+                - QuotaExceeded
                 type: string
               recommendationRequest:
                 description: |-

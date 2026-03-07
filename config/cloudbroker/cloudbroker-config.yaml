@@ -8,6 +8,7 @@ metadata:
 data:
   # Base URL for CloudBroker API service
   # Defaults to http://localhost:8000 if not set
+  # When Cloudburst runs in vcluster: use http://cloudbroker-service.cloudbroker.svc.cluster.local:8000 (host cluster DNS)
   baseurl: "http://cloudbroker-service:8000"
   # Optional: Timeout in seconds for CloudBroker API requests
   # timeout-seconds: "5"

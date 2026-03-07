@@ -49,6 +49,7 @@ PROVISIONING_TIMEOUT="${PROVISIONING_TIMEOUT:-600}"
 READY_TIMEOUT="${READY_TIMEOUT:-600}"
 POD_SCHEDULED_TIMEOUT="${POD_SCHEDULED_TIMEOUT:-120}"
 SCALEDOWN_TIMEOUT="${SCALEDOWN_TIMEOUT:-300}"
+COMPUTE_DELETE_TIMEOUT="${COMPUTE_DELETE_TIMEOUT:-180}"
 
 log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
@@ -433,6 +434,34 @@ wait_for_nodeclaim_deletion() {
     return 1
 }
 
+get_instance_id_from_nodeclaim() {
+    local id
+    id=$(kubectl get nodeclaim "${NODECLAIM_NAME}" -n "${TEST_NAMESPACE}" -o jsonpath='{.status.instanceID}' 2>/dev/null || true)
+    if [ -z "$id" ]; then
+        log_error "Could not get instance ID from NodeClaim ${NODECLAIM_NAME}"
+        return 1
+    fi
+    echo "$id"
+}
+
+wait_for_compute_deleted() {
+    local instance_id=$1
+    local timeout=${2:-180}
+    local elapsed=0
+    log_info "Waiting for Aruba compute instance to be deleted (timeout: ${timeout}s)..."
+    while [ $elapsed -lt $timeout ]; do
+        if (cd "${PROJECT_ROOT}" && go run ./hack/aruba-cleanup/main.go --verify="${instance_id}") 2>/dev/null; then
+            log_info "✓ Compute instance deleted"
+            return 0
+        fi
+        echo -n "."
+        sleep 10
+        elapsed=$((elapsed + 10))
+    done
+    log_error "Timeout: compute instance still exists"
+    return 1
+}
+
 CLEANUP_DONE=""
 cleanup() {
     [ -n "${CLEANUP_DONE:-}" ] && return
@@ -503,12 +532,45 @@ main() {
         echo ""
     fi
     log_info "=== Scale-down ==="
+    ARUBA_INSTANCE_ID=$(get_instance_id_from_nodeclaim) || { log_error "Could not get instance ID"; exit 1; }
+    log_info "Instance ID to verify: ${ARUBA_INSTANCE_ID}"
     delete_pending_pod
     echo ""
     if ! wait_for_nodeclaim_deletion "${SCALEDOWN_TIMEOUT}"; then
         log_error "Scale-down failed"
         exit 1
     fi
+    echo ""
+    if ! wait_for_compute_deleted "${ARUBA_INSTANCE_ID}" "${COMPUTE_DELETE_TIMEOUT}"; then
+        log_error "Compute instance was not deleted"
+        exit 1
+    fi
+
+    echo ""
+    log_info "Cleaning up any orphaned resources (volumes)..."
+    ORPHAN_VERIFIED=""
+    for attempt in 1 2 3; do
+        (cd "${PROJECT_ROOT}" && go run ./hack/aruba-cleanup/main.go --cleanup-orphans) 2>&1 || true
+        log_info "Waiting for Aruba API eventual consistency (instances/volumes may appear in list briefly after delete)..."
+        verify_elapsed=0
+        verify_timeout=120
+        while [ $verify_elapsed -lt $verify_timeout ]; do
+            sleep 15
+            verify_elapsed=$((verify_elapsed + 15))
+            log_info "Verifying no orphaned instances or volumes (attempt $attempt/3, ${verify_elapsed}s)..."
+            if (cd "${PROJECT_ROOT}" && go run ./hack/aruba-cleanup/main.go --verify-no-orphans) 2>&1; then
+                log_info "✓ No orphaned instances or boot volumes"
+                ORPHAN_VERIFIED=1
+                break
+            fi
+        done
+        [ -n "${ORPHAN_VERIFIED}" ] && break
+        if [ "$attempt" -eq 3 ]; then
+            log_error "Orphaned cb-* instances or cb-*-boot volumes still present after 3 attempts"
+            exit 1
+        fi
+        log_warn "Orphans still present, retrying cleanup..."
+    done
 
     echo ""
     log_info "=== E2E PASSED (Aruba Cloud) ==="

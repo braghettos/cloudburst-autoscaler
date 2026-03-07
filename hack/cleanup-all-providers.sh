@@ -25,13 +25,20 @@ run_cleanup() {
     fi
 }
 
-# Order: GCP, AWS, Azure, Hetzner, Scaleway, DigitalOcean, OVH
+# Order: GCP, AWS, Azure, Hetzner, Scaleway, DigitalOcean, Aruba, OVH
 run_cleanup "GCP"            bash "${SCRIPT_DIR}/gcp-cleanup.sh"
 run_cleanup "AWS"            bash "${SCRIPT_DIR}/aws-cleanup.sh"
 run_cleanup "Azure"          bash "${SCRIPT_DIR}/azure-cleanup.sh"
 run_cleanup "Hetzner"        bash "${SCRIPT_DIR}/hetzner-cleanup.sh"
 run_cleanup "Scaleway"       bash "${SCRIPT_DIR}/scaleway-cleanup.sh"
 run_cleanup "DigitalOcean"   bash "${SCRIPT_DIR}/digitalocean-cleanup.sh"
+if [ -n "${ARUBA_API_KEY:-}" ] && [ -n "${ARUBA_API_SECRET:-}" ] && [ -n "${ARUBA_PROJECT_ID:-}" ]; then
+    echo ""
+    echo "--- Aruba ---"
+    (cd "${PROJECT_ROOT}" && go run ./hack/aruba-cleanup/main.go) 2>&1 || echo "(skipped or no instances)"
+else
+    echo ""; echo "--- Aruba ---"; echo "Aruba credentials not set; skipping"
+fi
 if [ -n "${OVH_APPLICATION_KEY:-}" ] && [ -n "${OVH_APPLICATION_SECRET:-}" ] && [ -n "${OVH_CONSUMER_KEY:-}" ] && [ -n "${OVH_PROJECT_ID:-}" ]; then
     echo ""
     echo "--- OVH ---"

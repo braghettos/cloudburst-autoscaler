@@ -251,7 +251,7 @@ func TestRecommend_NoRecommendations(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty recommendations, got nil")
 	}
-	if err.Error() != "failed after 2 attempts: no recommendations returned" {
+	if err.Error() != "failed after 4 attempts: no recommendations returned" {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -282,7 +282,7 @@ func TestRecommend_HTTPError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for HTTP 500, got nil")
 	}
-	if err.Error() != "failed after 2 attempts: unexpected status code 500: internal server error" {
+	if err.Error() != "failed after 4 attempts: unexpected status code 500: internal server error" {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }

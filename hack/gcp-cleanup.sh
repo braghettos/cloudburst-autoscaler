@@ -11,8 +11,6 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 [ -f "${PROJECT_ROOT}/.env" ] && set -a && source "${PROJECT_ROOT}/.env" && set +a
 
 GCP_PROJECT="${GCP_PROJECT:-}"
-# When GCP_ZONE is set, only instances in that zone are deleted (scope from NodeClass).
-GCP_ZONE="${GCP_ZONE:-}"
 
 if [ -z "${GCP_PROJECT}" ]; then
     echo "GCP_PROJECT not set; skipping GCP cleanup"
@@ -24,16 +22,15 @@ if ! command -v gcloud &>/dev/null; then
     exit 0
 fi
 
-# List cb-* instances (project-wide, or in GCP_ZONE when set)
+# List cb-* instances project-wide (all zones). E2E may create VMs in different zones
+# (e.g. europe-central2 from CloudBroker) than GCP_ZONE in .env (e.g. europe-west1).
 total=0
-zones_arg=""
-[ -n "${GCP_ZONE}" ] && zones_arg="--zones=${GCP_ZONE}"
 while IFS=',' read -r name zone; do
     [ -z "$name" ] && continue
     echo "Deleting $name (zone: $zone)..."
     gcloud compute instances delete "$name" --zone="${zone}" --project="${GCP_PROJECT}" --quiet 2>/dev/null || true
     total=$((total + 1))
-done < <(gcloud compute instances list --project="${GCP_PROJECT}" --filter="name~^cb-" ${zones_arg} --format="csv[no-heading](name,zone.basename())" 2>/dev/null || true)
+done < <(gcloud compute instances list --project="${GCP_PROJECT}" --filter="name~^cb-" --format="csv[no-heading](name,zone.basename())" 2>/dev/null || true)
 
 if [ $total -gt 0 ]; then
     echo "Deleted $total cb-* VM(s)"

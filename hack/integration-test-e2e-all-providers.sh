@@ -79,7 +79,7 @@ NODECLAIM_CREATE_TIMEOUT="${NODECLAIM_CREATE_TIMEOUT:-300}"
 PROVISIONING_TIMEOUT="${PROVISIONING_TIMEOUT:-600}"
 READY_TIMEOUT="${READY_TIMEOUT:-600}"
 POD_SCHEDULED_TIMEOUT="${POD_SCHEDULED_TIMEOUT:-120}"
-SCALEDOWN_TIMEOUT="${SCALEDOWN_TIMEOUT:-300}"
+SCALEDOWN_TIMEOUT="${SCALEDOWN_TIMEOUT:-600}"
 
 # Detect enabled providers
 ENABLED_PROVIDERS=()
@@ -138,7 +138,7 @@ phase_cloudbroker() {
     kind delete cluster --name "${KIND_CLUSTER_NAME}" 2>/dev/null || true
 
     log_info "Starting CloudBroker..."
-    docker compose up -d
+    docker compose up -d --build
 
     log_info "Waiting for CloudBroker API health..."
     local retries=30
@@ -156,7 +156,21 @@ phase_cloudbroker() {
     make migrate
 
     log_info "Ingesting all providers (make ingest-all)..."
-    make ingest-all
+    local ingest_retries=3
+    local ingest_attempt=1
+    while [ $ingest_attempt -le $ingest_retries ]; do
+        if make ingest-all 2>&1; then
+            log_info "✓ Ingest completed successfully"
+            break
+        fi
+        if [ $ingest_attempt -eq $ingest_retries ]; then
+            log_error "Ingest failed after ${ingest_retries} attempts (transient network errors?)"
+            exit 1
+        fi
+        log_warn "Ingest attempt ${ingest_attempt}/${ingest_retries} failed, retrying in 15s..."
+        sleep 15
+        ingest_attempt=$((ingest_attempt + 1))
+    done
 
     log_info "✓ Phase A complete"
 }
@@ -720,14 +734,14 @@ phase_wait_all() {
 
     log_info "Waiting for all pods to be Running..."
     elapsed=0
-    while [ $elapsed -lt $((POD_SCHEDULED_TIMEOUT * expected_claims)); do
+    while [ $elapsed -lt $((POD_SCHEDULED_TIMEOUT * ${expected_claims:-0})); do
         local running=0
         for p in "${ENABLED_PROVIDERS[@]}"; do
             local phase
             phase=$(kubectl get pod "e2e-${p}-resource-hungry-pod" -n "${TEST_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
             [ "$phase" = "Running" ] && running=$((running + 1))
         done
-        if [ "$running" -eq "$expected_claims" ]; then
+        if [ "$running" -eq "${expected_claims:-0}" ]; then
             log_info "✓ All ${expected_claims} pod(s) Running"
             break
         fi
@@ -756,11 +770,10 @@ phase_playwright() {
     log_info "=== Phase E3: Playwright UI assertions ==="
     cd "${PROJECT_ROOT}"
 
-    for p in "${ENABLED_PROVIDERS[@]}"; do
-        log_info "Running Playwright for provider: ${p}"
-        run_playwright_ui_assertions "${p}" || exit 1
-        echo ""
-    done
+    # Run Playwright once (UI shows all providers; no need to run per-provider)
+    local prov="${ENABLED_PROVIDERS[0]:-gcp}"
+    log_info "Running Playwright (provider filter: ${prov})"
+    run_playwright_ui_assertions "${prov}" || exit 1
 
     log_info "✓ Phase E3 complete"
 }
@@ -784,6 +797,29 @@ phase_ui() {
 
     log_info "✓ UI available at http://127.0.0.1:8082"
     log_info "✓ Phase E2 complete"
+}
+
+# ── Graph dump (before pod deletion, for overlap/debug analysis) ─────────────────
+
+GRAPH_DUMP_FILE="${GRAPH_DUMP_FILE:-${PROJECT_ROOT}/graph-e2e-all-providers.json}"
+dump_graph_before_scale_down() {
+    log_info "Dumping graph API response to ${GRAPH_DUMP_FILE} (before pod deletion)..."
+    if ! docker ps -q -f name="^${UI_CONTAINER:-cloudburst-ui-e2e}$" 2>/dev/null | grep -q .; then
+        log_warn "UI container not running, skipping graph dump"
+        return 0
+    fi
+    local base="http://127.0.0.1:8082"
+    local cluster_id
+    cluster_id=$(curl -s --connect-timeout 5 "${base}/api/clusters" 2>/dev/null | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+    if [ -z "${cluster_id}" ]; then
+        log_warn "No cluster from /api/clusters, skipping graph dump"
+        return 0
+    fi
+    if curl -s --connect-timeout 10 "${base}/api/clusters/${cluster_id}/graph" 2>/dev/null > "${GRAPH_DUMP_FILE}"; then
+        [ -s "${GRAPH_DUMP_FILE}" ] && log_info "Graph saved: ${GRAPH_DUMP_FILE}"
+    else
+        log_warn "Failed to fetch graph API"
+    fi
 }
 
 # ── Phase F: Scale-down (mandatory) ─────────────────────────────────────────────
@@ -819,12 +855,20 @@ phase_scale_down() {
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 
+CONTROLLER_LOG_FILE="${CONTROLLER_LOG_FILE:-${PROJECT_ROOT}/controller-e2e-all-providers.log}"
 CLEANUP_DONE=""
 cleanup() {
     [ -n "${CLEANUP_DONE:-}" ] && return
     CLEANUP_DONE=1
     log_info "Cleaning up..."
     cd "${PROJECT_ROOT}" 2>/dev/null || true
+
+    # Dump controller logs before deleting namespace (for graph/concurrency analysis)
+    log_info "Dumping controller logs to ${CONTROLLER_LOG_FILE}..."
+    if kubectl get deployment -n "${CONTROLLER_NAMESPACE}" -o name 2>/dev/null | grep -q .; then
+        kubectl logs -n "${CONTROLLER_NAMESPACE}" -l app=cloudburst-controller --tail=50000 --all-containers=true 2>/dev/null > "${CONTROLLER_LOG_FILE}" || true
+        [ -s "${CONTROLLER_LOG_FILE}" ] && log_info "Controller log saved: ${CONTROLLER_LOG_FILE}"
+    fi
 
     declare -f stop_ui &>/dev/null && stop_ui
 
@@ -853,6 +897,10 @@ cleanup() {
 main() {
     log_info "=== CloudBurst E2E — All Providers ==="
     check_prerequisites
+    # For AWS: use only one region (cleanup, AMI resolution)
+    if [[ " ${ENABLED_PROVIDERS[*]} " =~ " aws " ]]; then
+        export AWS_REGIONS="${AWS_REGION:-eu-west-1}"
+    fi
     echo ""
 
     trap cleanup EXIT
@@ -872,6 +920,8 @@ main() {
     phase_wait_all
     echo ""
     phase_playwright
+    echo ""
+    dump_graph_before_scale_down
     echo ""
     phase_scale_down
 

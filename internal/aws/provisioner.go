@@ -233,6 +233,8 @@ func isRetryableError(err error) bool {
 		return false
 	}
 	errStr := err.Error()
+	// VcpuLimitExceeded is not retryable with the same instance type; the controller
+	// will try alternatives (smaller instance types) from NodeClaim.Spec.Alternatives.
 	retryable := []string{"rate limit", "throttl", "temporary", "timeout", "deadline exceeded", "unavailable", "503", "502", "500", "RequestLimitExceeded"}
 	for _, r := range retryable {
 		if strings.Contains(strings.ToLower(errStr), r) {

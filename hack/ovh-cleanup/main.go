@@ -48,7 +48,7 @@ func main() {
 	defer prov.Close()
 
 	if *verify != "" {
-		_, err := prov.GetInstanceStatus(ctx, *verify)
+		status, err := prov.GetInstanceStatus(ctx, *verify)
 		if err != nil {
 			if strings.Contains(strings.ToLower(err.Error()), "404") || strings.Contains(err.Error(), "not found") {
 				fmt.Printf("Instance %s confirmed deleted\n", *verify)
@@ -57,7 +57,13 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error checking instance: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Fprintf(os.Stderr, "Instance %s still exists\n", *verify)
+		// OVH/OpenStack can return DELETING or DELETED while instance is being torn down
+		switch strings.ToUpper(status) {
+		case "DELETING", "DELETED":
+			fmt.Printf("Instance %s is %s (effectively deleted)\n", *verify, status)
+			os.Exit(0)
+		}
+		fmt.Fprintf(os.Stderr, "Instance %s still exists (status=%s)\n", *verify, status)
 		os.Exit(1)
 	}
 

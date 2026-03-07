@@ -16,7 +16,19 @@ limitations under the License.
 
 package errors
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
+
+// IsVcpuLimitExceeded returns true if the error is AWS VcpuLimitExceeded (account quota).
+// The controller uses this to prefer smaller alternatives when falling back.
+func IsVcpuLimitExceeded(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "VcpuLimitExceeded")
+}
 
 // InstanceFailedError is returned by IsInstanceRunning when the instance has permanently failed.
 // The controller should transition the NodeClaim to Failed instead of retrying.

@@ -18,6 +18,8 @@ package planner
 
 import (
 	corev1 "k8s.io/api/core/v1"
+
+	cloudburstv1alpha1 "github.com/diegobraga/cloudburst-autoscaler/api/v1alpha1"
 )
 
 // DesiredCapacity represents the calculated resource requirements
@@ -215,6 +217,121 @@ func PodHasProviderOrNodePoolConstraint(pod *corev1.Pod) bool {
 	}
 
 	return false
+}
+
+// GetPodNodePoolConstraint returns the pod's cloudburst.io/nodepool value from nodeSelector or nodeAffinity.
+// Returns empty string if not set.
+func GetPodNodePoolConstraint(pod *corev1.Pod) string {
+	const nodepoolKey = "cloudburst.io/nodepool"
+
+	if pod.Spec.NodeSelector != nil {
+		if v, ok := pod.Spec.NodeSelector[nodepoolKey]; ok && v != "" {
+			return v
+		}
+	}
+
+	if pod.Spec.Affinity != nil && pod.Spec.Affinity.NodeAffinity != nil {
+		required := pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+		if required != nil {
+			for _, term := range required.NodeSelectorTerms {
+				for _, expr := range term.MatchExpressions {
+					if expr.Key == nodepoolKey && len(expr.Values) > 0 {
+						return expr.Values[0]
+					}
+				}
+				for _, field := range term.MatchFields {
+					if field.Key == nodepoolKey && len(field.Values) > 0 {
+						return field.Values[0]
+					}
+				}
+			}
+		}
+		for _, pref := range pod.Spec.Affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution {
+			for _, expr := range pref.Preference.MatchExpressions {
+				if expr.Key == nodepoolKey && len(expr.Values) > 0 {
+					return expr.Values[0]
+				}
+			}
+			for _, field := range pref.Preference.MatchFields {
+				if field.Key == nodepoolKey && len(field.Values) > 0 {
+					return field.Values[0]
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// GetPodProviderConstraint returns the pod's cloudburst.io/provider value from nodeSelector or nodeAffinity.
+// Returns empty string if not set.
+func GetPodProviderConstraint(pod *corev1.Pod) string {
+	const providerKey = "cloudburst.io/provider"
+
+	if pod.Spec.NodeSelector != nil {
+		if v, ok := pod.Spec.NodeSelector[providerKey]; ok && v != "" {
+			return v
+		}
+	}
+
+	if pod.Spec.Affinity != nil && pod.Spec.Affinity.NodeAffinity != nil {
+		required := pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+		if required != nil {
+			for _, term := range required.NodeSelectorTerms {
+				for _, expr := range term.MatchExpressions {
+					if expr.Key == providerKey && len(expr.Values) > 0 {
+						return expr.Values[0]
+					}
+				}
+				for _, field := range term.MatchFields {
+					if field.Key == providerKey && len(field.Values) > 0 {
+						return field.Values[0]
+					}
+				}
+			}
+		}
+		for _, pref := range pod.Spec.Affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution {
+			for _, expr := range pref.Preference.MatchExpressions {
+				if expr.Key == providerKey && len(expr.Values) > 0 {
+					return expr.Values[0]
+				}
+			}
+			for _, field := range pref.Preference.MatchFields {
+				if field.Key == providerKey && len(field.Values) > 0 {
+					return field.Values[0]
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// PodMatchesNodePool returns true if the pod's scheduling constraints match the NodePool.
+// A pod matches when:
+// - Pod has cloudburst.io/nodepool and it equals nodePool.Name, OR
+// - Pod has cloudburst.io/provider and it is in nodePool.Spec.Requirements.AllowedProviders, OR
+// - Pod has no nodepool/provider constraint (unbound) and nodePool has no AllowedProviders (catch-all).
+func PodMatchesNodePool(pod *corev1.Pod, nodePool *cloudburstv1alpha1.NodePool) bool {
+	nodepoolVal := GetPodNodePoolConstraint(pod)
+	providerVal := GetPodProviderConstraint(pod)
+
+	if nodepoolVal != "" {
+		return nodepoolVal == nodePool.Name
+	}
+	if providerVal != "" {
+		if len(nodePool.Spec.Requirements.AllowedProviders) == 0 {
+			return true
+		}
+		for _, p := range nodePool.Spec.Requirements.AllowedProviders {
+			if p == providerVal {
+				return true
+			}
+		}
+		return false
+	}
+	// Unbound pod: only match NodePools with no AllowedProviders (catch-all)
+	return len(nodePool.Spec.Requirements.AllowedProviders) == 0
 }
 
 // AddProviderNodeAffinity returns a copy of the pod's affinity with

@@ -20,6 +20,12 @@ import (
 	"context"
 )
 
+// Stopper is an optional interface for providers that require stopping before delete
+// (e.g. Aruba Cloud rejects delete while the instance is running).
+type Stopper interface {
+	StopInstance(ctx context.Context, instanceID string) error
+}
+
 // Provisioner is the common interface all cloud providers must implement.
 type Provisioner interface {
 	// CreateInstance provisions a new VM and returns a provider-prefixed instance ID.

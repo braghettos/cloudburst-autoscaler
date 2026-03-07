@@ -34,6 +34,11 @@ type NodeClaimSpec struct {
 	// Alternatives holds fallback instance details if the chosen one fails (e.g. resource unavailable).
 	// +optional
 	Alternatives []InstanceDetails `json:"alternatives,omitempty"`
+
+	// RecommendationRequest stores the CloudBroker request params for retry when provisioning fails.
+	// Set by NodePool when creating the NodeClaim; used by NodeClaim controller to fetch new recommendations.
+	// +optional
+	RecommendationRequest *RecommendationRequestSummary `json:"recommendationRequest,omitempty"`
 }
 
 // InstanceDetails contains the selected instance information
@@ -60,7 +65,7 @@ type InstanceDetails struct {
 }
 
 // NodeClaimPhase represents the phase of a NodeClaim
-// +kubebuilder:validation:Enum=Pending;Provisioning;Joining;Ready;Failed;Deleting
+// +kubebuilder:validation:Enum=Pending;Provisioning;Joining;Ready;Failed;Deleting;QuotaExceeded
 type NodeClaimPhase string
 
 const (
@@ -81,6 +86,10 @@ const (
 
 	// NodeClaimPhaseDeleting indicates the NodeClaim is being deleted
 	NodeClaimPhaseDeleting NodeClaimPhase = "Deleting"
+
+	// NodeClaimPhaseQuotaExceeded indicates provisioning failed due to cloud provider quota
+	// (e.g. AWS VcpuLimitExceeded). The controller will periodically retry until the limit is fixed.
+	NodeClaimPhaseQuotaExceeded NodeClaimPhase = "QuotaExceeded"
 )
 
 // RecommendationRequestSummary stores the CloudBroker request that led to this NodeClaim.

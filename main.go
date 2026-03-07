@@ -92,6 +92,7 @@ func main() {
 	cloudBrokerClient := cloudbroker.NewClient()
 	if err = (&controller.NodePoolReconciler{
 		Client:      mgr.GetClient(),
+		APIReader:   mgr.GetAPIReader(),
 		Scheme:      mgr.GetScheme(),
 		CloudBroker: cloudBrokerClient,
 		Recorder:    mgr.GetEventRecorderFor("nodepool-controller"),
@@ -114,12 +115,13 @@ func main() {
 	}
 
 	if err = (&controller.NodeClaimReconciler{
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-		Recorder:   mgr.GetEventRecorderFor("nodeclaim-controller"),
-		Clientset:  clientset,
-		RestConfig: mgr.GetConfig(),
-		Config:     controller.LoadConfig(),
+		Client:       mgr.GetClient(),
+		Scheme:       mgr.GetScheme(),
+		Recorder:     mgr.GetEventRecorderFor("nodeclaim-controller"),
+		Clientset:    clientset,
+		RestConfig:   mgr.GetConfig(),
+		Config:       controller.LoadConfig(),
+		CloudBroker:  cloudBrokerClient,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NodeClaim")
 		os.Exit(1)

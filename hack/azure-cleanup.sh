@@ -18,24 +18,29 @@ if ! command -v az &>/dev/null; then
     exit 0
 fi
 
-# Check we have enough Azure creds (need at least subscription for subscription-wide list)
+if [ -z "${AZURE_SUBSCRIPTION_ID}" ]; then
+    echo "AZURE_SUBSCRIPTION_ID not set; skipping Azure cleanup (required to target correct subscription)"
+    exit 0
+fi
+
+# Check we have enough Azure creds
 if ! az account show &>/dev/null; then
     echo "Azure not logged in (run 'az login'); skipping Azure cleanup"
     exit 0
 fi
 
-# Set subscription if provided
-[ -n "${AZURE_SUBSCRIPTION_ID}" ] && az account set --subscription "${AZURE_SUBSCRIPTION_ID}" 2>/dev/null || true
+# Ensure we target the right subscription (E2E may use different default)
+az account set --subscription "${AZURE_SUBSCRIPTION_ID}" 2>/dev/null || true
 
 # List cb-* VMs subscription-wide (name, resourceGroup) - catches orphans in any RG
-# Query returns [name, resourceGroup] per VM; -o tsv gives "name\tresourceGroup" per line
-vms_tsv=$(az vm list --query "[?starts_with(name, 'cb-')].[name, resourceGroup]" -o tsv 2>/dev/null || true)
+# Pass --subscription explicitly so we query the correct subscription
+vms_tsv=$(az vm list --subscription "${AZURE_SUBSCRIPTION_ID}" --query "[?starts_with(name, 'cb-')].[name, resourceGroup]" -o tsv 2>/dev/null || true)
 
 total=0
 while IFS=$'\t' read -r vm_name rg; do
     [ -z "$vm_name" ] || [ -z "$rg" ] && continue
     echo "Deleting Azure VM: $vm_name (resource group: $rg)..."
-    az vm delete --resource-group "$rg" --name "$vm_name" --yes --no-wait 2>/dev/null || true
+    az vm delete --subscription "${AZURE_SUBSCRIPTION_ID}" --resource-group "$rg" --name "$vm_name" --yes --no-wait 2>/dev/null || true
     total=$((total + 1))
 done <<< "$vms_tsv"
 

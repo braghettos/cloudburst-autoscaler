@@ -56,6 +56,9 @@ const (
 // using NodePool.Requirements to decide how many nodes are needed and what to ask CloudBroker for.
 type NodePoolReconciler struct {
 	client.Client
+	// APIReader bypasses the cache for fresh reads. Used when counting NodeClaims
+	// before create decisions to avoid race conditions from stale cache.
+	APIReader   client.Reader
 	Scheme      *runtime.Scheme
 	CloudBroker *cloudbroker.Client
 	Recorder    record.EventRecorder
@@ -84,8 +87,8 @@ func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, err
 	}
 
-	// Calculate desired capacity from unschedulable pods
-	desiredCapacity, err := r.calculateDesiredCapacity(ctx)
+	// Calculate desired capacity from unschedulable pods (scoped to this NodePool)
+	desiredCapacity, err := r.calculateDesiredCapacity(ctx, nodePool)
 	if err != nil {
 		logger.Error(err, "unable to calculate desired capacity")
 		return ctrl.Result{}, err
@@ -105,8 +108,14 @@ func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		"nodesNeeded", nodesNeeded,
 	)
 
-	// Count active NodeClaims for this NodePool
-	activeCount, err := r.countActiveNodeClaims(ctx, req.Namespace, req.Name)
+	// Count active NodeClaims for this NodePool. When nodesNeeded > 0, use APIReader
+	// (bypasses cache) to avoid race: stale cache could show activeCount=0 and cause
+	// duplicate NodeClaim creation before the cache sees the first Create.
+	var reader client.Reader = r.Client
+	if nodesNeeded > 0 && r.APIReader != nil {
+		reader = r.APIReader
+	}
+	activeCount, err := r.countActiveNodeClaimsWithReader(ctx, req.Namespace, req.Name, reader)
 	if err != nil {
 		logger.Error(err, "unable to count active NodeClaims")
 		return ctrl.Result{}, err
@@ -123,16 +132,36 @@ func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		// Don't fail reconciliation on scale-down errors
 	}
 
+	// Block creating new NodeClaims if any NodeClaim for this NodePool is in QuotaExceeded
+	// (e.g. AWS VcpuLimitExceeded). Wait for the user to fix the limit; the NodeClaim
+	// controller will retry periodically.
+	if hasQuotaExceeded, err := r.hasQuotaExceededNodeClaim(ctx, req.Namespace, req.Name); err != nil {
+		logger.Error(err, "unable to check for quota-exceeded NodeClaims")
+		return ctrl.Result{}, err
+	} else if hasQuotaExceeded {
+		logger.Info("skipping NodeClaim creation: existing NodeClaim in QuotaExceeded, waiting for limit to be fixed")
+		return ctrl.Result{RequeueAfter: 2 * time.Minute}, nil
+	}
+
 	// Create NodeClaims if needed. Create at most one per reconcile so that when the
 	// controller is re-enqueued by Owns(NodeClaim) after Create(), the next reconcile
-	// sees updated activeCount (or we create one more); avoids creating nodesNeeded
-	// copies when the cache is still stale and activeCount appears 0.
-	if nodesNeeded > activeCount {
+	// sees updated activeCount (or we create one more). We use APIReader for the count
+	// when nodesNeeded > 0 to avoid stale cache causing duplicate creates.
+	maxNodes := nodePool.Spec.Limits.MaxNodes
+	if maxNodes > 0 && activeCount >= maxNodes {
+		logger.Info("skipping NodeClaim creation: at maxNodes limit", "activeCount", activeCount, "maxNodes", maxNodes)
+	} else if nodesNeeded > activeCount {
 		nodesToCreate := nodesNeeded - activeCount
 		if nodesToCreate > 1 {
 			nodesToCreate = 1
 		}
-		logger.Info("creating node claims",
+		if maxNodes > 0 && activeCount+nodesToCreate > maxNodes {
+			nodesToCreate = maxNodes - activeCount
+		}
+		if nodesToCreate < 1 {
+			logger.Info("skipping NodeClaim creation: would exceed maxNodes", "activeCount", activeCount, "maxNodes", maxNodes)
+		} else {
+			logger.Info("creating node claims",
 			"nodesToCreate", nodesToCreate,
 			"nodePool", req.Name,
 		)
@@ -175,13 +204,14 @@ func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if err != nil {
 			logger.Error(err, "failed to get recommendation from CloudBroker")
 			r.recordEvent(nodePool, corev1.EventTypeWarning, "CloudBrokerError", fmt.Sprintf("Failed to get recommendation: %v", err))
-			return ctrl.Result{}, err
+			// Requeue instead of returning error so we retry after a delay (e.g. CloudBroker may recover)
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		if len(recommendations) == 0 {
 			err := fmt.Errorf("CloudBroker returned no recommendations")
 			logger.Error(err, "CloudBroker returned empty list")
 			r.recordEvent(nodePool, corev1.EventTypeWarning, "CloudBrokerError", err.Error())
-			return ctrl.Result{}, err
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		chosen := &recommendations[0]
 		alternatives := recommendations[1:]
@@ -265,6 +295,7 @@ func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		// Requeue so next reconciliation sees updated activeCount. Use a delay so the informer
 		// cache is likely to include the new NodeClaim(s) before we consider creating more.
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+		}
 	}
 
 	// Always requeue periodically so we can:
@@ -467,18 +498,32 @@ func (r *NodePoolReconciler) initiateDeletion(ctx context.Context, nodeClaim *cl
 }
 
 // calculateDesiredCapacity calculates desired capacity from unschedulable pods
-func (r *NodePoolReconciler) calculateDesiredCapacity(ctx context.Context) (planner.DesiredCapacity, error) {
+// scoped to pods that match this NodePool (via cloudburst.io/nodepool or cloudburst.io/provider).
+func (r *NodePoolReconciler) calculateDesiredCapacity(ctx context.Context, nodePool *cloudburstv1alpha1.NodePool) (planner.DesiredCapacity, error) {
 	// List all pods
 	podList := &corev1.PodList{}
 	if err := r.List(ctx, podList); err != nil {
 		return planner.DesiredCapacity{}, err
 	}
 
-	// Filter eligible pods (same logic as DemandDetector)
-	eligiblePods := r.filterEligiblePods(podList.Items)
+	// Filter eligible pods and scope to this NodePool
+	eligiblePods := r.filterEligiblePodsForNodePool(podList.Items, nodePool)
 
 	// Calculate desired capacity
 	return planner.CalculateDesiredCapacity(eligiblePods), nil
+}
+
+// filterEligiblePodsForNodePool filters pods that are eligible for demand detection
+// and match this NodePool (via cloudburst.io/nodepool or cloudburst.io/provider).
+func (r *NodePoolReconciler) filterEligiblePodsForNodePool(pods []corev1.Pod, nodePool *cloudburstv1alpha1.NodePool) []corev1.Pod {
+	eligible := r.filterEligiblePods(pods)
+	var matched []corev1.Pod
+	for i := range eligible {
+		if planner.PodMatchesNodePool(&eligible[i], nodePool) {
+			matched = append(matched, eligible[i])
+		}
+	}
+	return matched
 }
 
 // patchPodsWithProviderAffinity patches eligible unschedulable pods that have no
@@ -576,9 +621,30 @@ func (r *NodePoolReconciler) filterEligiblePods(pods []corev1.Pod) []corev1.Pod 
 }
 
 // countActiveNodeClaims counts NodeClaims in active phases
-func (r *NodePoolReconciler) countActiveNodeClaims(ctx context.Context, namespace, nodePoolName string) (int32, error) {
+// hasQuotaExceededNodeClaim returns true if any NodeClaim for this NodePool is in QuotaExceeded phase.
+func (r *NodePoolReconciler) hasQuotaExceededNodeClaim(ctx context.Context, namespace, nodePoolName string) (bool, error) {
 	nodeClaimList := &cloudburstv1alpha1.NodeClaimList{}
 	if err := r.List(ctx, nodeClaimList, client.InNamespace(namespace)); err != nil {
+		return false, err
+	}
+	for i := range nodeClaimList.Items {
+		claim := &nodeClaimList.Items[i]
+		if claim.Spec.NodePoolRef != nodePoolName {
+			continue
+		}
+		if claim.Status.Phase == cloudburstv1alpha1.NodeClaimPhaseQuotaExceeded {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (r *NodePoolReconciler) countActiveNodeClaimsWithReader(ctx context.Context, namespace, nodePoolName string, reader client.Reader) (int32, error) {
+	if reader == nil {
+		reader = r.Client
+	}
+	nodeClaimList := &cloudburstv1alpha1.NodeClaimList{}
+	if err := reader.List(ctx, nodeClaimList, client.InNamespace(namespace)); err != nil {
 		return 0, err
 	}
 
@@ -590,18 +656,20 @@ func (r *NodePoolReconciler) countActiveNodeClaims(ctx context.Context, namespac
 			continue
 		}
 
-		// Count only active phases.
-		// IMPORTANT: we also treat Deleting as "active" to avoid spinning up a
-		// replacement node while the old one is still being drained/terminated,
-		// which could otherwise cause multiple VMs to exist concurrently.
+		// Count only active phases. Exclude Failed (terminal).
+		// IMPORTANT: treat empty phase as active. Newly created NodeClaims have
+		// status.Phase="" until the NodeClaim controller runs; excluding them
+		// caused duplicate NodeClaim creation when the NodePool requeue (15s)
+		// ran before the NodeClaim controller had set Phase to Pending.
+		// We also treat Deleting as "active" to avoid spinning up a replacement
+		// node while the old one is still being drained/terminated.
+		// QuotaExceeded is counted as active (we're waiting for the limit to be fixed).
 		phase := claim.Status.Phase
-		if phase == cloudburstv1alpha1.NodeClaimPhasePending ||
-			phase == cloudburstv1alpha1.NodeClaimPhaseProvisioning ||
-			phase == cloudburstv1alpha1.NodeClaimPhaseJoining ||
-			phase == cloudburstv1alpha1.NodeClaimPhaseReady ||
-			phase == cloudburstv1alpha1.NodeClaimPhaseDeleting {
-			count++
+		if phase == cloudburstv1alpha1.NodeClaimPhaseFailed {
+			continue
 		}
+		// Empty, Pending, Provisioning, Joining, Ready, Deleting, QuotaExceeded
+		count++
 	}
 
 	return count, nil
@@ -646,6 +714,28 @@ func ramGbFromDemand(memBytes int64, poolMin float64) float64 {
 		return poolMin
 	}
 	return needGb
+}
+
+// brokerReqToSummary converts a CloudBroker request to NodeClaim RecommendationRequestSummary for retry.
+func brokerReqToSummary(req *cloudbroker.RecommendationRequest) *cloudburstv1alpha1.RecommendationRequestSummary {
+	if req == nil {
+		return nil
+	}
+	s := &cloudburstv1alpha1.RecommendationRequestSummary{
+		MinVCPU:            req.MinVCPU,
+		MinRAMGb:           req.MinRAMGb,
+		RegionConstraint:   req.RegionConstraint,
+		MaxPriceEurPerHour: req.MaxPriceEurPerHour,
+		AllowedProviders:  append([]string(nil), req.AllowedProviders...),
+		DataSourceProvider: req.DataSourceProvider,
+		DataSourceRegion:   req.DataSourceRegion,
+		EstimatedEgressGbPerHour: req.EstimatedEgressGbPerHour,
+		MaxTCOEurPerHour:   req.MaxTCOEurPerHour,
+	}
+	if req.Arch != nil {
+		s.Arch = *req.Arch
+	}
+	return s
 }
 
 // createNodeClaim creates a new NodeClaim with recommendation from CloudBroker
@@ -699,6 +789,7 @@ func (r *NodePoolReconciler) createNodeClaim(ctx context.Context, nodePool *clou
 	if len(truncatedPoolName) > 53 {
 		truncatedPoolName = truncatedPoolName[:53]
 	}
+	reqSummary := brokerReqToSummary(brokerReq)
 	nodeClaim := &cloudburstv1alpha1.NodeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: fmt.Sprintf("cb-%s-", truncatedPoolName),
@@ -708,8 +799,8 @@ func (r *NodePoolReconciler) createNodeClaim(ctx context.Context, nodePool *clou
 			},
 		},
 		Spec: cloudburstv1alpha1.NodeClaimSpec{
-			NodePoolRef:  nodePool.Name,
-			NodeClassRef: nodeClass.Name,
+			NodePoolRef:          nodePool.Name,
+			NodeClassRef:         nodeClass.Name,
 			Chosen: cloudburstv1alpha1.InstanceDetails{
 				Provider:        chosen.Provider,
 				Region:          chosen.Region,
@@ -718,7 +809,8 @@ func (r *NodePoolReconciler) createNodeClaim(ctx context.Context, nodePool *clou
 				RamGb:           chosen.RAMGb,
 				PriceEurPerHour: chosen.PriceEurPerHour,
 			},
-			Alternatives: altDetails,
+			Alternatives:          altDetails,
+			RecommendationRequest: reqSummary,
 		},
 	}
 
@@ -756,8 +848,10 @@ func (r *NodePoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// enqueueNodePoolsForPod enqueues all NodePools in the same namespace as the pod,
-// so that demand from unschedulable pods triggers scale-up.
+// enqueueNodePoolsForPod enqueues NodePools that the pod could match, so that demand
+// from unschedulable pods triggers scale-up. If the pod has cloudburst.io/nodepool or
+// cloudburst.io/provider, only matching NodePools are enqueued. Otherwise all NodePools
+// in the namespace are enqueued (unbound pod).
 func (r *NodePoolReconciler) enqueueNodePoolsForPod(ctx context.Context, obj client.Object) []reconcile.Request {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok {
@@ -767,9 +861,20 @@ func (r *NodePoolReconciler) enqueueNodePoolsForPod(ctx context.Context, obj cli
 	if err := r.List(ctx, list, client.InNamespace(pod.Namespace)); err != nil {
 		return nil
 	}
+	// Unbound pods (no nodepool/provider constraint) enqueue all NodePools
+	if !planner.PodHasProviderOrNodePoolConstraint(pod) {
+		reqs := make([]reconcile.Request, 0, len(list.Items))
+		for i := range list.Items {
+			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+		}
+		return reqs
+	}
 	reqs := make([]reconcile.Request, 0, len(list.Items))
 	for i := range list.Items {
-		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+		np := &list.Items[i]
+		if planner.PodMatchesNodePool(pod, np) {
+			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(np)})
+		}
 	}
 	return reqs
 }
