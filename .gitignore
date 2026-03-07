@@ -34,6 +34,7 @@ hack/kind-config.yaml
 
 # E2E test logs
 e2e-logs/
+*.log
 
 # macOS
 .DS_Store

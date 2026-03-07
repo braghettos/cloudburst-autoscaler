@@ -222,17 +222,6 @@ func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			"chosen", fmt.Sprintf("%s/%s/%s (vcpu=%d ramGb=%.1f price=%.4f EUR/h)", chosen.Provider, chosen.Region, chosen.InstanceType, chosen.VCPU, chosen.RAMGb, chosen.PriceEurPerHour),
 			"alternativesCount", len(alternatives),
 		)
-		for i, alt := range alternatives {
-			logger.V(1).Info("CloudBroker alternative",
-				"rank", i+2,
-				"provider", alt.Provider,
-				"region", alt.Region,
-				"instanceType", alt.InstanceType,
-				"vcpu", alt.VCPU,
-				"ramGb", alt.RAMGb,
-				"priceEurPerHour", alt.PriceEurPerHour,
-			)
-		}
 		if chosen.Provider != "gcp" && chosen.Provider != "scaleway" && chosen.Provider != "hetzner" && chosen.Provider != "digitalocean" && chosen.Provider != "ovh" && chosen.Provider != "aws" && chosen.Provider != "azure" && chosen.Provider != "aruba" {
 			err := fmt.Errorf("recommendation provider is %q, only gcp, scaleway, hetzner, digitalocean, ovh, aws, azure, and aruba are supported", chosen.Provider)
 			logger.Error(err, "unsupported provider")

@@ -101,7 +101,6 @@ func (r *NodeClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	// Handle provisioning based on phase
-	logger.V(1).Info("reconcile", "phase", nodeClaim.Status.Phase)
 	switch nodeClaim.Status.Phase {
 	case cloudburstv1alpha1.NodeClaimPhasePending:
 		return r.handlePending(ctx, nodeClaim, logger)
@@ -404,9 +403,6 @@ func (r *NodeClaimReconciler) handlePending(ctx context.Context, nodeClaim *clou
 				}
 				return ctrl.Result{Requeue: true}, nil
 			}
-			if fetchErr != nil {
-				logger.V(1).Info("CloudBroker retry fetch failed, marking as Failed", "err", fetchErr)
-			}
 		}
 		metrics.NodeClaimPhaseTransitionsTotal.WithLabelValues(provider, string(nodeClaim.Status.Phase), string(cloudburstv1alpha1.NodeClaimPhaseFailed)).Inc()
 		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InstanceCreationFailed", fmt.Sprintf("Failed to create instance: %v", err))
@@ -684,7 +680,6 @@ func (r *NodeClaimReconciler) handleJoining(ctx context.Context, nodeClaim *clou
 	for i := range nodeList.Items {
 		nodeNames = append(nodeNames, nodeList.Items[i].Name)
 	}
-	logger.V(1).Info("listed nodes", "count", len(nodeList.Items), "nodeNames", nodeNames)
 
 	var matchingNode *corev1.Node
 	var matchReason string
@@ -1083,7 +1078,6 @@ func (r *NodeClaimReconciler) statusUpdateWithRetry(ctx context.Context, nodeCla
 		apply(nodeClaim)
 		if err := r.Status().Update(ctx, nodeClaim); err != nil {
 			if k8serrors.IsConflict(err) && attempt < 2 {
-				logger.V(1).Info("status update conflict, re-fetching and retrying", "attempt", attempt+1)
 				if err := r.Get(ctx, client.ObjectKeyFromObject(nodeClaim), nodeClaim); err != nil {
 					return err
 				}
