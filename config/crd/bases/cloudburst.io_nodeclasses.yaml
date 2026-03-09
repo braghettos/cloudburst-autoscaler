@@ -528,41 +528,6 @@ spec:
                       from CloudBroker recommendation; used as fallback)
                     type: string
                 type: object
-              seeweb:
-                description: Seeweb configuration (used when NodeClaim Chosen.Provider
-                  is seeweb)
-                properties:
-                  credentialsSecretRef:
-                    description: |-
-                      CredentialsSecretRef references a secret containing Seeweb credentials.
-                      Secret must have keys "SEEWEB_USERNAME" and "SEEWEB_PASSWORD".
-                    properties:
-                      key:
-                        description: The key of the secret to select from.  Must be
-                          a valid secret key.
-                        type: string
-                      name:
-                        description: |-
-                          Name of the referent.
-                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                        type: string
-                      optional:
-                        description: Specify whether the Secret or its key must be
-                          defined
-                        type: boolean
-                    required:
-                    - key
-                    type: object
-                    x-kubernetes-map-type: atomic
-                  image:
-                    description: 'Image is the Seeweb image name (default: ubuntu-2204)'
-                    type: string
-                  location:
-                    description: Location is the Seeweb datacenter (optional when
-                      region comes from CloudBroker; e.g. it-fr2, it-mi2, ch-lug1,
-                      bg-sof1)
-                    type: string
-                type: object
               tailscale:
                 description: Tailscale configuration for VPN connectivity
                 properties:

@@ -51,10 +51,6 @@ type NodeClassSpec struct {
 	// +optional
 	Azure *AzureConfig `json:"azure,omitempty"`
 
-	// Seeweb configuration (used when NodeClaim Chosen.Provider is seeweb)
-	// +optional
-	Seeweb *SeewebConfig `json:"seeweb,omitempty"`
-
 	// Aruba configuration (used when NodeClaim Chosen.Provider is aruba)
 	// +optional
 	Aruba *ArubaConfig `json:"aruba,omitempty"`
@@ -211,22 +207,6 @@ type AWSConfig struct {
 	// SecretAccessKeySecretRef references a secret containing the AWS secret access key.
 	// +optional
 	SecretAccessKeySecretRef *corev1.SecretKeySelector `json:"secretAccessKeySecretRef,omitempty"`
-}
-
-// SeewebConfig defines Seeweb Cloud Server-specific configuration
-type SeewebConfig struct {
-	// Location is the Seeweb datacenter (optional when region comes from CloudBroker; e.g. it-fr2, it-mi2, ch-lug1, bg-sof1)
-	// +optional
-	Location string `json:"location,omitempty"`
-
-	// CredentialsSecretRef references a secret containing Seeweb credentials.
-	// Secret must have keys "SEEWEB_USERNAME" and "SEEWEB_PASSWORD".
-	// +optional
-	CredentialsSecretRef *corev1.SecretKeySelector `json:"credentialsSecretRef,omitempty"`
-
-	// Image is the Seeweb image name (default: ubuntu-2204)
-	// +optional
-	Image string `json:"image,omitempty"`
 }
 
 // ArubaConfig defines Aruba Cloud Server-specific configuration

@@ -504,16 +504,6 @@ func getProvisioningParams(provider string, nodeClass *cloudburstv1alpha1.NodeCl
 			azureLocation = nodeClass.Spec.Azure.Location
 		}
 		return azureLocation, nodeClass.Spec.Azure.ImageReference, nil
-	case "seeweb":
-		if nodeClass.Spec.Seeweb == nil {
-			return "", "", fmt.Errorf("NodeClass spec.seeweb is required")
-		}
-		// CloudBroker returns region slugs like it-fr2, it-mi2, ch-lug1, bg-sof1
-		seewebLocation := chosenRegion
-		if nodeClass.Spec.Seeweb.Location != "" {
-			seewebLocation = nodeClass.Spec.Seeweb.Location
-		}
-		return seewebLocation, nodeClass.Spec.Seeweb.Image, nil
 	case "aruba":
 		if nodeClass.Spec.Aruba == nil {
 			return "", "", fmt.Errorf("NodeClass spec.aruba is required")

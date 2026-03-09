@@ -30,7 +30,6 @@ import (
 	"github.com/diegobraga/cloudburst-autoscaler/internal/hetzner"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/ovh"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/scaleway"
-	"github.com/diegobraga/cloudburst-autoscaler/internal/seeweb"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -62,8 +61,6 @@ func NewFromNodeClass(ctx context.Context, provider string, nodeClass *cloudburs
 		return newAWS(ctx, nodeClass, namespace, c, region)
 	case "azure":
 		return newAzure(ctx, nodeClass, namespace, c, region)
-	case "seeweb":
-		return newSeeweb(ctx, nodeClass, namespace, c, region)
 	case "aruba":
 		return newAruba(ctx, nodeClass, namespace, c, region)
 	default:
@@ -329,41 +326,6 @@ func newAzure(ctx context.Context, nodeClass *cloudburstv1alpha1.NodeClass, name
 		clientSecret = os.Getenv("AZURE_CLIENT_SECRET")
 	}
 	return azure.NewProvisioner(ctx, subID, rg, location, subnetID, tenantID, clientID, clientSecret)
-}
-
-func newSeeweb(ctx context.Context, nodeClass *cloudburstv1alpha1.NodeClass, namespace string, c Getter, location string) (Provisioner, error) {
-	if nodeClass.Spec.Seeweb == nil {
-		return nil, fmt.Errorf("NodeClass spec.seeweb is required for Seeweb provider")
-	}
-	var username, password string
-	if nodeClass.Spec.Seeweb.CredentialsSecretRef != nil {
-		secret := &corev1.Secret{}
-		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: nodeClass.Spec.Seeweb.CredentialsSecretRef.Name}, secret); err != nil {
-			return nil, fmt.Errorf("failed to get Seeweb credentials secret: %w", err)
-		}
-		k := nodeClass.Spec.Seeweb.CredentialsSecretRef.Key
-		if k == "" {
-			k = "SEEWEB_USERNAME"
-		}
-		username = string(secret.Data[k])
-		if username == "" {
-			username = string(secret.Data["SEEWEB_USERNAME"])
-		}
-		password = string(secret.Data["SEEWEB_PASSWORD"])
-		if password == "" {
-			password = string(secret.Data["password"])
-		}
-	}
-	if username == "" {
-		username = os.Getenv("SEEWEB_USERNAME")
-	}
-	if password == "" {
-		password = os.Getenv("SEEWEB_PASSWORD")
-	}
-	if username == "" || password == "" {
-		return nil, fmt.Errorf("Seeweb credentials required: set spec.seeweb.credentialsSecretRef or SEEWEB_USERNAME, SEEWEB_PASSWORD env vars")
-	}
-	return seeweb.NewProvisioner(ctx, username, password)
 }
 
 func newAruba(ctx context.Context, nodeClass *cloudburstv1alpha1.NodeClass, namespace string, c Getter, region string) (Provisioner, error) {
