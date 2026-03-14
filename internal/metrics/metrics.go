@@ -95,6 +95,34 @@ var (
 		},
 		[]string{"provider", "phase"},
 	)
+
+	// UnschedulablePods is the current number of unschedulable pods by namespace and nodepool.
+	UnschedulablePods = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "cloudburst_unschedulable_pods",
+			Help: "Current number of unschedulable pods (demand signal)",
+		},
+		[]string{"namespace", "nodepool"},
+	)
+
+	// ReconciliationDurationSeconds is the per-controller reconcile loop duration.
+	ReconciliationDurationSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "cloudburst_reconciliation_duration_seconds",
+			Help:    "Duration of controller reconciliation loops (seconds)",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"controller"},
+	)
+
+	// TailscaleRequestDurationSeconds is the Tailscale API request latency.
+	TailscaleRequestDurationSeconds = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "cloudburst_tailscale_request_duration_seconds",
+			Help:    "Tailscale API request duration (seconds)",
+			Buckets: prometheus.DefBuckets,
+		},
+	)
 )
 
 func init() {
@@ -107,5 +135,8 @@ func init() {
 		DrainDurationSeconds,
 		CloudBrokerRequestDurationSeconds,
 		NodeClaimsActive,
+		UnschedulablePods,
+		ReconciliationDurationSeconds,
+		TailscaleRequestDurationSeconds,
 	)
 }

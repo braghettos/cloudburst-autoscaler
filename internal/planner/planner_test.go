@@ -201,18 +201,16 @@ func TestCalculateDesiredCapacityForPod(t *testing.T) {
 
 func TestCalculateDesiredCapacity(t *testing.T) {
 	tests := []struct {
-		name             string
-		pods             []corev1.Pod
-		expectedCPU      int64
-		expectedMemory   int64
-		expectedPodCount int
+		name           string
+		pods           []corev1.Pod
+		expectedCPU    int64
+		expectedMemory int64
 	}{
 		{
-			name:             "empty pod list",
-			pods:             []corev1.Pod{},
-			expectedCPU:      0,
-			expectedMemory:   0,
-			expectedPodCount: 0,
+			name:           "empty pod list",
+			pods:           []corev1.Pod{},
+			expectedCPU:    0,
+			expectedMemory: 0,
 		},
 		{
 			name: "single pod",
@@ -233,9 +231,8 @@ func TestCalculateDesiredCapacity(t *testing.T) {
 					},
 				},
 			},
-			expectedCPU:      100,
-			expectedMemory:   134217728,
-			expectedPodCount: 1,
+			expectedCPU:    100,
+			expectedMemory: 134217728,
 		},
 		{
 			name: "multiple pods - sum resources",
@@ -271,9 +268,8 @@ func TestCalculateDesiredCapacity(t *testing.T) {
 					},
 				},
 			},
-			expectedCPU:      500,       // 200m + 300m
-			expectedMemory:   805306368, // 256Mi + 512Mi
-			expectedPodCount: 2,
+			expectedCPU:    500,       // 200m + 300m
+			expectedMemory: 805306368, // 256Mi + 512Mi
 		},
 		{
 			name: "pods with init containers",
@@ -319,9 +315,8 @@ func TestCalculateDesiredCapacity(t *testing.T) {
 					},
 				},
 			},
-			expectedCPU:      600,        // max(500m init, 200m container) + 100m = 500m + 100m
-			expectedMemory:   1207959552, // max(1Gi init, 256Mi container) + 128Mi = 1073741824 + 134217728
-			expectedPodCount: 2,
+			expectedCPU:    600,        // max(500m init, 200m container) + 100m = 500m + 100m
+			expectedMemory: 1207959552, // max(1Gi init, 256Mi container) + 128Mi = 1073741824 + 134217728
 		},
 	}
 
@@ -333,9 +328,6 @@ func TestCalculateDesiredCapacity(t *testing.T) {
 			}
 			if capacity.MemBytesTotal != tt.expectedMemory {
 				t.Errorf("expected Memory %d bytes, got %d", tt.expectedMemory, capacity.MemBytesTotal)
-			}
-			if capacity.PodCount != tt.expectedPodCount {
-				t.Errorf("expected PodCount %d, got %d", tt.expectedPodCount, capacity.PodCount)
 			}
 		})
 	}

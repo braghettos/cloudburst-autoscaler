@@ -64,7 +64,6 @@ func (r *DemandDetectorReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	logger.Info("calculated desired capacity",
 		"cpuMilliTotal", desiredCapacity.CPUMilliTotal,
 		"memBytesTotal", desiredCapacity.MemBytesTotal,
-		"podCount", desiredCapacity.PodCount,
 	)
 
 	return ctrl.Result{}, nil

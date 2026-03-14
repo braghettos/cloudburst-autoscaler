@@ -41,12 +41,17 @@ echo "✓ Generated kind-config.yaml"
 # Step 4: Recreate kind cluster
 echo ""
 echo "Step 4: Creating kind cluster..."
-if kind get clusters | grep -q "^${KIND_CLUSTER_NAME}$"; then
+if kind get clusters 2>/dev/null | grep -q "^${KIND_CLUSTER_NAME}$"; then
     echo "Deleting existing cluster: $KIND_CLUSTER_NAME"
     kind delete cluster --name "$KIND_CLUSTER_NAME" || true
 fi
 
-kind create cluster --name "$KIND_CLUSTER_NAME" --config "$OUTPUT_FILE"
+# Use KUBECONFIG if set (avoids "failed to lock config file" when ~/.kube is restricted)
+if [ -n "${KUBECONFIG:-}" ]; then
+    kind create cluster --name "$KIND_CLUSTER_NAME" --config "$OUTPUT_FILE" --kubeconfig "${KUBECONFIG}"
+else
+    kind create cluster --name "$KIND_CLUSTER_NAME" --config "$OUTPUT_FILE"
+fi
 
 echo "✓ Kind cluster created"
 

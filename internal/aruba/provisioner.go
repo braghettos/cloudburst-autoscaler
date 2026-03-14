@@ -29,13 +29,12 @@ import (
 	"time"
 
 	"github.com/diegobraga/cloudburst-autoscaler/internal/errors"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/provutil"
 )
 
 const (
 	InstanceIDPrefix  = "aruba/"
 	DefaultImage      = "LU22-001" // Ubuntu 22 64bit
-	MaxRetries        = 3
-	RetryDelay        = 2 * time.Second
 	cloudburstVPCName = "cloudburst-default"
 	tokenURL          = "https://mylogin.aruba.it/auth/realms/cmp-new-apikey/protocol/openid-connect/token"
 	defaultBaseURL    = "https://api.arubacloud.com"
@@ -145,26 +144,16 @@ func (p *Provisioner) apiPath(provider, resource string) string {
 
 // CreateInstance creates an Aruba Cloud Server.
 func (p *Provisioner) CreateInstance(ctx context.Context, name, instanceType, regionOrZone, startupScript, imageFromConfig string) (string, error) {
-	var lastErr error
-	for attempt := 0; attempt <= MaxRetries; attempt++ {
-		if attempt > 0 {
-			waitTime := RetryDelay * time.Duration(1<<uint(attempt-1))
-			select {
-			case <-ctx.Done():
-				return "", fmt.Errorf("context cancelled: %w", ctx.Err())
-			case <-time.After(waitTime):
-			}
-		}
-		instanceID, err := p.createInstanceOnce(ctx, name, instanceType, regionOrZone, startupScript, imageFromConfig)
-		if err == nil {
-			return instanceID, nil
-		}
-		if !isRetryableError(err) {
-			return "", err
-		}
-		lastErr = err
+	var instanceID string
+	err := provutil.WithRetry(ctx, provutil.MaxRetries, provutil.RetryDelay, provutil.IsRetryableError, func() error {
+		var retryErr error
+		instanceID, retryErr = p.createInstanceOnce(ctx, name, instanceType, regionOrZone, startupScript, imageFromConfig)
+		return retryErr
+	})
+	if err != nil {
+		return "", err
 	}
-	return "", fmt.Errorf("failed after %d attempts: %w", MaxRetries+1, lastErr)
+	return instanceID, nil
 }
 
 func (p *Provisioner) createInstanceOnce(ctx context.Context, name, flavorName, location, startupScript, imageFromConfig string) (string, error) {
@@ -770,24 +759,9 @@ func (p *Provisioner) StopInstance(ctx context.Context, instanceID string) error
 
 // DeleteInstance deletes an Aruba Cloud Server and its boot volume.
 func (p *Provisioner) DeleteInstance(ctx context.Context, instanceID string) error {
-	var lastErr error
-	for attempt := 0; attempt <= MaxRetries; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("context cancelled: %w", ctx.Err())
-			case <-time.After(RetryDelay * time.Duration(1<<uint(attempt-1))):
-			}
-		}
-		if err := p.deleteInstanceOnce(ctx, instanceID); err == nil {
-			return nil
-		} else if !isRetryableError(err) {
-			return err
-		} else {
-			lastErr = err
-		}
-	}
-	return fmt.Errorf("failed after %d attempts: %w", MaxRetries+1, lastErr)
+	return provutil.WithRetry(ctx, provutil.MaxRetries, provutil.RetryDelay, provutil.IsRetryableError, func() error {
+		return p.deleteInstanceOnce(ctx, instanceID)
+	})
 }
 
 func (p *Provisioner) deleteInstanceOnce(ctx context.Context, instanceID string) error {
@@ -915,14 +889,14 @@ func (p *Provisioner) IsInstanceRunning(ctx context.Context, instanceID string) 
 	if data.Status.State != nil {
 		state = strings.ToLower(strings.TrimSpace(*data.Status.State))
 	}
-	if data.Status.FailureReason != nil {
-		reason := strings.TrimSpace(*data.Status.FailureReason)
-		if state == "failed" {
-			if reason == "" {
-				reason = "unknown (check Aruba Cloud console)"
+	if state == "failed" {
+		reason := "unknown (check Aruba Cloud console)"
+		if data.Status.FailureReason != nil {
+			if r := strings.TrimSpace(*data.Status.FailureReason); r != "" {
+				reason = r
 			}
-			return false, &errors.InstanceFailedError{Reason: reason}
 		}
+		return false, &errors.InstanceFailedError{Reason: reason}
 	}
 	return state == "running" || state == "started" || state == "active", nil
 }
@@ -938,15 +912,7 @@ func GenerateInstanceName(nodeClaimName string) string {
 }
 
 func parseInstanceID(instanceID string) (projectID, instanceIDPart string, err error) {
-	if !strings.HasPrefix(instanceID, InstanceIDPrefix) {
-		return "", "", fmt.Errorf("invalid Aruba instance ID format: %s", instanceID)
-	}
-	rest := strings.TrimPrefix(instanceID, InstanceIDPrefix)
-	parts := strings.SplitN(rest, "/", 2)
-	if len(parts) != 2 {
-		return "", "", fmt.Errorf("invalid Aruba instance ID format: %s", instanceID)
-	}
-	return parts[0], parts[1], nil
+	return provutil.ParseInstanceID(instanceID, InstanceIDPrefix)
 }
 
 func extractIDFromURI(uri, segment string) string {
@@ -976,17 +942,4 @@ func formatAPIErrorBody(body []byte) string {
 		return string(body)
 	}
 	return string(body[:2048]) + "..."
-}
-
-func isRetryableError(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := strings.ToLower(err.Error())
-	for _, r := range []string{"rate limit", "quota", "temporary", "timeout", "deadline exceeded", "unavailable", "503", "502", "500"} {
-		if strings.Contains(s, r) {
-			return true
-		}
-	}
-	return false
 }

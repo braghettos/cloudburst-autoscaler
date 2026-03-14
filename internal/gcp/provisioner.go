@@ -18,12 +18,16 @@ package gcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
-	"time"
 
 	"cloud.google.com/go/compute/apiv1"
 	"cloud.google.com/go/compute/apiv1/computepb"
+	cberrors "github.com/diegobraga/cloudburst-autoscaler/internal/errors"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/provutil"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 )
 
@@ -32,10 +36,6 @@ const (
 	DefaultImageFamily = "ubuntu-2204-lts"
 	// DefaultImageProject is the default image project
 	DefaultImageProject = "ubuntu-os-cloud"
-	// MaxRetries is the maximum number of retry attempts
-	MaxRetries = 3
-	// RetryDelay is the initial delay between retries
-	RetryDelay = 2 * time.Second
 )
 
 // Provisioner handles GCP instance provisioning
@@ -87,33 +87,16 @@ func GetZone(fallback string) string {
 // CreateInstance creates a GCP compute instance.
 // The image parameter is unused for GCP; imageFamily and imageProject are set on the Provisioner.
 func (p *Provisioner) CreateInstance(ctx context.Context, name, machineType, zone, startupScript, image string) (string, error) {
-	var lastErr error
-
-	for attempt := 0; attempt <= MaxRetries; attempt++ {
-		if attempt > 0 {
-			// Exponential backoff
-			waitTime := RetryDelay * time.Duration(1<<uint(attempt-1))
-			select {
-			case <-ctx.Done():
-				return "", fmt.Errorf("context cancelled: %w", ctx.Err())
-			case <-time.After(waitTime):
-			}
-		}
-
-		instanceID, err := p.createInstanceOnce(ctx, name, machineType, zone, startupScript)
-		if err == nil {
-			return instanceID, nil
-		}
-
-		// Check if error is retryable
-		if !isRetryableError(err) {
-			return "", err
-		}
-
-		lastErr = err
+	var instanceID string
+	err := provutil.WithRetry(ctx, provutil.MaxRetries, provutil.RetryDelay, provutil.IsRetryableError, func() error {
+		var retryErr error
+		instanceID, retryErr = p.createInstanceOnce(ctx, name, machineType, zone, startupScript)
+		return retryErr
+	})
+	if err != nil {
+		return "", err
 	}
-
-	return "", fmt.Errorf("failed after %d attempts: %w", MaxRetries+1, lastErr)
+	return instanceID, nil
 }
 
 // createInstanceOnce makes a single attempt to create an instance
@@ -198,33 +181,9 @@ func (p *Provisioner) createInstanceOnce(ctx context.Context, name, machineType,
 
 // DeleteInstance deletes a GCP compute instance
 func (p *Provisioner) DeleteInstance(ctx context.Context, instanceID string) error {
-	var lastErr error
-
-	for attempt := 0; attempt <= MaxRetries; attempt++ {
-		if attempt > 0 {
-			// Exponential backoff
-			waitTime := RetryDelay * time.Duration(1<<uint(attempt-1))
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("context cancelled: %w", ctx.Err())
-			case <-time.After(waitTime):
-			}
-		}
-
-		err := p.deleteInstanceOnce(ctx, instanceID)
-		if err == nil {
-			return nil
-		}
-
-		// Check if error is retryable
-		if !isRetryableError(err) {
-			return err
-		}
-
-		lastErr = err
-	}
-
-	return fmt.Errorf("failed after %d attempts: %w", MaxRetries+1, lastErr)
+	return provutil.WithRetry(ctx, provutil.MaxRetries, provutil.RetryDelay, provutil.IsRetryableError, func() error {
+		return p.deleteInstanceOnce(ctx, instanceID)
+	})
 }
 
 // deleteInstanceOnce makes a single attempt to delete an instance
@@ -247,11 +206,18 @@ func (p *Provisioner) deleteInstanceOnce(ctx context.Context, instanceID string)
 
 	op, err := p.client.Delete(ctx, req)
 	if err != nil {
+		var apiErr *googleapi.Error
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusNotFound {
+			return nil
+		}
 		return fmt.Errorf("failed to delete instance: %w", err)
 	}
 
-	// Wait for operation to complete
 	if err := op.Wait(ctx); err != nil {
+		var apiErr *googleapi.Error
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusNotFound {
+			return nil
+		}
 		return fmt.Errorf("failed to wait for instance deletion: %w", err)
 	}
 
@@ -288,33 +254,30 @@ func GenerateInstanceName(nodeClaimName string) string {
 	return nodeClaimName
 }
 
-// isRetryableError checks if an error is retryable
-func isRetryableError(err error) bool {
-	if err == nil {
-		return false
+// IsInstanceRunning checks whether the VM is in a RUNNING state.
+func (p *Provisioner) IsInstanceRunning(ctx context.Context, instanceID string) (bool, error) {
+	parts := strings.Split(instanceID, "/")
+	if len(parts) < 6 || parts[0] != "projects" || parts[2] != "zones" || parts[4] != "instances" {
+		return false, fmt.Errorf("invalid instance ID format: %s", instanceID)
 	}
 
-	errStr := err.Error()
-	// Check for common retryable errors
-	retryableErrors := []string{
-		"rate limit",
-		"quota",
-		"temporary",
-		"timeout",
-		"deadline exceeded",
-		"unavailable",
-		"503",
-		"502",
-		"500",
+	instance, err := p.client.Get(ctx, &computepb.GetInstanceRequest{
+		Project:  parts[1],
+		Zone:     parts[3],
+		Instance: parts[5],
+	})
+	if err != nil {
+		return false, fmt.Errorf("failed to get instance: %w", err)
 	}
-
-	for _, retryable := range retryableErrors {
-		if strings.Contains(strings.ToLower(errStr), retryable) {
-			return true
-		}
+	if instance.Status == nil {
+		return false, nil
 	}
-
-	return false
+	status := *instance.Status
+	switch status {
+	case "TERMINATED", "SUSPENDED":
+		return false, &cberrors.InstanceFailedError{Reason: fmt.Sprintf("instance status: %s", status)}
+	}
+	return status == "RUNNING", nil
 }
 
 // Close closes the provisioner and releases resources

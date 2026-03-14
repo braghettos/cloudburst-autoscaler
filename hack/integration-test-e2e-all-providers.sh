@@ -90,7 +90,12 @@ ENABLED_PROVIDERS=()
 [ -n "${ARUBA_API_KEY:-}" ]                  && [ -n "${ARUBA_API_SECRET:-}" ] && [ -n "${ARUBA_PROJECT_ID:-}" ] && ENABLED_PROVIDERS+=("aruba")
 [ -n "${OVH_APPLICATION_KEY:-}" ]            && [ -n "${OVH_APPLICATION_SECRET:-}" ] && [ -n "${OVH_CONSUMER_KEY:-}" ] && [ -n "${OVH_PROJECT_ID:-}" ] && ENABLED_PROVIDERS+=("ovh")
 [ -n "${AWS_ACCESS_KEY_ID:-}" ]               && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ] && ENABLED_PROVIDERS+=("aws")
-[ -n "${AZURE_TENANT_ID:-}" ]                && [ -n "${AZURE_CLIENT_ID:-}" ] && [ -n "${AZURE_CLIENT_SECRET:-}" ] && [ -n "${AZURE_SUBSCRIPTION_ID:-}" ] && [ -n "${AZURE_RESOURCE_GROUP:-}" ] && [ -n "${AZURE_SUBNET_ID:-}" ] && ENABLED_PROVIDERS+=("azure")
+[ -n "${AZURE_TENANT_ID:-}" ]                && [ -n "${AZURE_CLIENT_ID:-}" ] && [ -n "${AZURE_CLIENT_SECRET:-}" ] && [ -n "${AZURE_SUBSCRIPTION_ID:-}" ] && [ -n "${AZURE_RESOURCE_GROUP:-}" ] && ENABLED_PROVIDERS+=("azure")
+[ -n "${UPCLOUD_API_TOKEN:-}" ]             && ENABLED_PROVIDERS+=("upcloud")
+[ -n "${EXOSCALE_API_KEY:-}" ]              && [ -n "${EXOSCALE_API_SECRET:-}" ] && ENABLED_PROVIDERS+=("exoscale")
+if [ -n "${IONOS_API_TOKEN:-}" ] || { [ -n "${IONOS_USERNAME:-}" ] && [ -n "${IONOS_PASSWORD:-}" ]; }; then
+    ENABLED_PROVIDERS+=("ionos")
+fi
 
 log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
@@ -109,9 +114,12 @@ check_prerequisites() {
     [ -z "$TAILSCALE_CMD" ] && { log_error "tailscale not found"; missing=$((missing+1)); }
     ! "$TAILSCALE_CMD" status &>/dev/null && { log_error "Tailscale not running"; missing=$((missing+1)); }
     [ -z "${TAILSCALE_AUTHKEY}" ] && { log_error "TAILSCALE_AUTHKEY not set"; missing=$((missing+1)); }
-    [ ${#ENABLED_PROVIDERS[@]} -eq 0 ] && { log_error "No provider credentials set. Set env for at least one of: gcp, scaleway, hetzner, digitalocean, aruba, ovh, aws, azure"; missing=$((missing+1)); }
+    [ ${#ENABLED_PROVIDERS[@]} -eq 0 ] && { log_error "No provider credentials set. Set env for at least one of: gcp, scaleway, hetzner, digitalocean, aruba, ovh, aws, azure, upcloud, exoscale, ionos"; missing=$((missing+1)); }
     if [[ " ${ENABLED_PROVIDERS[*]} " =~ " gcp " ]]; then
         [ -z "${GCP_PROJECT:-}" ] && { log_error "GCP_PROJECT not set (required when GCP is enabled). Set in .env or it will be read from GOOGLE_APPLICATION_CREDENTIALS"; missing=$((missing+1)); }
+    fi
+    if [[ " ${ENABLED_PROVIDERS[*]} " =~ " ionos " ]]; then
+        [ -z "${IONOS_DATACENTER_ID:-}" ] && [ -z "${IONOS_REGION_TO_DATACENTER_ID:-}" ] && { log_error "IONOS_DATACENTER_ID or IONOS_REGION_TO_DATACENTER_ID required when IONOS is enabled"; missing=$((missing+1)); }
     fi
     for cmd in docker kind kubectl curl; do
         command -v $cmd &>/dev/null || { log_error "$cmd not found"; missing=$((missing+1)); }
@@ -254,6 +262,21 @@ deploy_controller_all_providers() {
         --from-literal=AZURE_CLIENT_ID="${AZURE_CLIENT_ID}" \
         --from-literal=AZURE_CLIENT_SECRET="${AZURE_CLIENT_SECRET}" \
         -n "${CONTROLLER_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+    [ -n "${UPCLOUD_API_TOKEN:-}" ] && \
+        kubectl create secret generic upcloud-credentials --from-literal=UPCLOUD_API_TOKEN="${UPCLOUD_API_TOKEN}" -n "${CONTROLLER_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+    [ -n "${EXOSCALE_API_KEY:-}" ] && [ -n "${EXOSCALE_API_SECRET:-}" ] && \
+        kubectl create secret generic exoscale-credentials \
+        --from-literal=EXOSCALE_API_KEY="${EXOSCALE_API_KEY}" \
+        --from-literal=EXOSCALE_API_SECRET="${EXOSCALE_API_SECRET}" \
+        -n "${CONTROLLER_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+    if [ -n "${IONOS_API_TOKEN:-}" ]; then
+        kubectl create secret generic ionos-credentials --from-literal=IONOS_API_TOKEN="${IONOS_API_TOKEN}" -n "${CONTROLLER_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+    elif [ -n "${IONOS_USERNAME:-}" ] && [ -n "${IONOS_PASSWORD:-}" ]; then
+        kubectl create secret generic ionos-credentials \
+        --from-literal=IONOS_USERNAME="${IONOS_USERNAME}" \
+        --from-literal=IONOS_PASSWORD="${IONOS_PASSWORD}" \
+        -n "${CONTROLLER_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+    fi
 
     # RBAC
     cat <<EOF | kubectl apply -f -
@@ -387,6 +410,49 @@ EOF
             secretKeyRef:
               name: azure-credentials
               key: AZURE_CLIENT_SECRET"
+    fi
+    if [[ " ${ENABLED_PROVIDERS[*]} " =~ " upcloud " ]]; then
+        env_block="${env_block}
+        - name: UPCLOUD_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: upcloud-credentials
+              key: UPCLOUD_API_TOKEN"
+    fi
+    if [[ " ${ENABLED_PROVIDERS[*]} " =~ " exoscale " ]]; then
+        env_block="${env_block}
+        - name: EXOSCALE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: exoscale-credentials
+              key: EXOSCALE_API_KEY
+        - name: EXOSCALE_API_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: exoscale-credentials
+              key: EXOSCALE_API_SECRET"
+    fi
+    if [[ " ${ENABLED_PROVIDERS[*]} " =~ " ionos " ]]; then
+        if [ -n "${IONOS_API_TOKEN:-}" ]; then
+            env_block="${env_block}
+        - name: IONOS_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: ionos-credentials
+              key: IONOS_API_TOKEN"
+        else
+            env_block="${env_block}
+        - name: IONOS_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: ionos-credentials
+              key: IONOS_USERNAME
+        - name: IONOS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: ionos-credentials
+              key: IONOS_PASSWORD"
+        fi
     fi
 
     # Resolve AWS AMI if needed
@@ -528,6 +594,21 @@ phase_nodeclass_and_secrets() {
         --from-literal=AZURE_CLIENT_ID="${AZURE_CLIENT_ID}" \
         --from-literal=AZURE_CLIENT_SECRET="${AZURE_CLIENT_SECRET}" \
         -n "${TEST_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+    [ -n "${UPCLOUD_API_TOKEN:-}" ] && \
+        kubectl create secret generic upcloud-credentials --from-literal=UPCLOUD_API_TOKEN="${UPCLOUD_API_TOKEN}" -n "${TEST_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+    [ -n "${EXOSCALE_API_KEY:-}" ] && [ -n "${EXOSCALE_API_SECRET:-}" ] && \
+        kubectl create secret generic exoscale-credentials \
+        --from-literal=EXOSCALE_API_KEY="${EXOSCALE_API_KEY}" \
+        --from-literal=EXOSCALE_API_SECRET="${EXOSCALE_API_SECRET}" \
+        -n "${TEST_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+    if [ -n "${IONOS_API_TOKEN:-}" ]; then
+        kubectl create secret generic ionos-credentials --from-literal=IONOS_API_TOKEN="${IONOS_API_TOKEN}" -n "${TEST_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+    elif [ -n "${IONOS_USERNAME:-}" ] && [ -n "${IONOS_PASSWORD:-}" ]; then
+        kubectl create secret generic ionos-credentials \
+        --from-literal=IONOS_USERNAME="${IONOS_USERNAME}" \
+        --from-literal=IONOS_PASSWORD="${IONOS_PASSWORD}" \
+        -n "${TEST_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+    fi
 
     # Build NodeClass YAML with all enabled provider configs
     {
@@ -626,6 +707,42 @@ phase_nodeclass_and_secrets() {
             echo "    clientSecretSecretRef:"
             echo "      name: azure-credentials"
             echo "      key: AZURE_CLIENT_SECRET"
+        fi
+        # UpCloud
+        if [[ " ${ENABLED_PROVIDERS[*]} " =~ " upcloud " ]]; then
+            echo "  upcloud:"
+            echo "    zone: \"${UPCLOUD_ZONE:-fi-hel1}\""
+            echo "    apiTokenSecretRef:"
+            echo "      name: upcloud-credentials"
+            echo "      key: UPCLOUD_API_TOKEN"
+        fi
+        # Exoscale
+        if [[ " ${ENABLED_PROVIDERS[*]} " =~ " exoscale " ]]; then
+            echo "  exoscale:"
+            echo "    zone: \"${EXOSCALE_ZONE:-ch-gva-2}\""
+            echo "    apiKeySecretRef:"
+            echo "      name: exoscale-credentials"
+            echo "      key: EXOSCALE_API_KEY"
+            echo "    apiSecretSecretRef:"
+            echo "      name: exoscale-credentials"
+            echo "      key: EXOSCALE_API_SECRET"
+        fi
+        # IONOS
+        if [[ " ${ENABLED_PROVIDERS[*]} " =~ " ionos " ]]; then
+            echo "  ionos:"
+            [ -n "${IONOS_DATACENTER_ID:-}" ] && echo "    datacenterID: \"${IONOS_DATACENTER_ID}\""
+            if [ -n "${IONOS_API_TOKEN:-}" ]; then
+                echo "    apiTokenSecretRef:"
+                echo "      name: ionos-credentials"
+                echo "      key: IONOS_API_TOKEN"
+            else
+                echo "    usernameSecretRef:"
+                echo "      name: ionos-credentials"
+                echo "      key: IONOS_USERNAME"
+                echo "    passwordSecretRef:"
+                echo "      name: ionos-credentials"
+                echo "      key: IONOS_PASSWORD"
+            fi
         fi
         echo "  join:"
         echo "    hostApiServer: \"https://${HOST_TS_IP}:6443\""

@@ -61,16 +61,15 @@ type NodePoolRequirements struct {
 	// +optional
 	AllowedProviders []string `json:"allowedProviders,omitempty"`
 
-	// MinVCPU is the minimum vCPU per node for this pool. Used for scaling math and CloudBroker requests.
-	// When unset, defaults to 2.
+	// ExcludedInstanceTypes excludes specific instance types from CloudBroker recommendations.
+	// Useful when certain VM families have no quota (e.g. Azure B-series with 0 cores).
 	// +optional
-	MinVCPU *int32 `json:"minVCPU,omitempty"`
+	ExcludedInstanceTypes []string `json:"excludedInstanceTypes,omitempty"`
 
-	// MinRAMGb is the minimum RAM in GB per node for this pool. Used for scaling math and CloudBroker requests.
-	// When unset, defaults to 8.
+	// ExcludedInstanceTypePrefixes excludes instance types whose name starts with any prefix.
+	// E.g. "Standard_B" excludes all Azure B-series (which often have 0 quota in free-tier subs).
 	// +optional
-	// +kubebuilder:validation:Type=number
-	MinRAMGb *float64 `json:"minRAMGb,omitempty"`
+	ExcludedInstanceTypePrefixes []string `json:"excludedInstanceTypePrefixes,omitempty"`
 
 	// TCOPlacement defines placement affinity for TCO-aware recommendations.
 	// When set, CloudBroker factors in egress costs when ranking instances.
@@ -140,6 +139,9 @@ type NodePoolDisruption struct {
 
 // NodePoolStatus defines the observed state of NodePool
 type NodePoolStatus struct {
+	// Conditions represent the latest available observations of the NodePool's state.
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 //+kubebuilder:object:root=true

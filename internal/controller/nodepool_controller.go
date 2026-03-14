@@ -19,9 +19,11 @@ package controller
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/go-logr/logr"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -42,16 +44,12 @@ import (
 const (
 	// DefaultMinNodes is the default minimum number of nodes when NodePool.Spec.Limits.MinNodes is unset
 	DefaultMinNodes = 1
-	// DefaultMinVCPU is the default minimum vCPU per node when NodePool.Spec.Requirements.MinVCPU is unset
-	DefaultMinVCPU = 2
-	// DefaultMinRAMGb is the default minimum RAM per node in GB when NodePool.Spec.Requirements.MinRAMGb is unset
-	DefaultMinRAMGb = 8.0
 )
 
 // NodePoolReconciler reconciles a NodePool object.
 //
 // Concept of NodePool: a pool of nodes that share the same constraints (region, arch, price, providers),
-// limits (min/max nodes), per-node capacity (MinVCPU, MinRAMGb), template (labels/taints), and disruption
+// limits (min/max nodes), template (labels/taints), and disruption
 // policy. The controller creates NodeClaims when unschedulable pod demand exceeds current capacity,
 // using NodePool.Requirements to decide how many nodes are needed and what to ask CloudBroker for.
 type NodePoolReconciler struct {
@@ -97,7 +95,7 @@ func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// Size the next node to fit current unschedulable demand so we create one node that
 	// accommodates the pod(s), rather than multiple small nodes from a fixed pool size.
 	// We need 1 node when there is demand; that node will be requested with min vCPU/RAM
-	// derived from desiredCapacity (NodePool.MinVCPU/MinRAMGb are the floor).
+	// derived from desiredCapacity (pod demand).
 	nodesNeeded := int32(0)
 	if desiredCapacity.CPUMilliTotal > 0 || desiredCapacity.MemBytesTotal > 0 {
 		nodesNeeded = 1
@@ -171,12 +169,10 @@ func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			// Architecture is extracted from pod requirements (nodeSelector/nodeAffinity)
 			// If no architecture requirement is found in pods, pass empty string to CloudBroker
 			// (CloudBroker will handle the default or any-arch recommendation)
-			minVCPU := vcpuFromDemand(desiredCapacity.CPUMilliTotal, getMinVCPUFromNodePool(nodePool))
-			minRAMGb := ramGbFromDemand(desiredCapacity.MemBytesTotal, getMinRAMGbFromNodePool(nodePool))
-
+			overheadCPU, overheadMem := r.estimateDaemonSetOverhead(ctx)
 			brokerReq := cloudbroker.RecommendationRequest{
-				MinVCPU:            minVCPU,
-				MinRAMGb:           minRAMGb,
+				MinVCPU:            vcpuFromDemand(desiredCapacity.CPUMilliTotal, overheadCPU),
+				MinRAMGb:           ramGbFromDemand(desiredCapacity.MemBytesTotal, overheadMem),
 				RegionConstraint:   nodePool.Spec.Requirements.RegionConstraint,
 				MaxPriceEurPerHour: nodePool.Spec.Requirements.MaxPriceEurPerHour,
 				Limit:              10,
@@ -190,6 +186,12 @@ func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			}
 			if len(nodePool.Spec.Requirements.AllowedProviders) > 0 {
 				brokerReq.AllowedProviders = nodePool.Spec.Requirements.AllowedProviders
+			}
+			if len(nodePool.Spec.Requirements.ExcludedInstanceTypes) > 0 {
+				brokerReq.ExcludedInstanceTypes = nodePool.Spec.Requirements.ExcludedInstanceTypes
+			}
+			if len(nodePool.Spec.Requirements.ExcludedInstanceTypePrefixes) > 0 {
+				brokerReq.ExcludedInstanceTypePrefixes = nodePool.Spec.Requirements.ExcludedInstanceTypePrefixes
 			}
 			if nodePool.Spec.Requirements.TCOPlacement != nil {
 				brokerReq.DataSourceProvider = nodePool.Spec.Requirements.TCOPlacement.DataSourceProvider
@@ -222,8 +224,8 @@ func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 				"chosen", fmt.Sprintf("%s/%s/%s (vcpu=%d ramGb=%.1f price=%.4f EUR/h)", chosen.Provider, chosen.Region, chosen.InstanceType, chosen.VCPU, chosen.RAMGb, chosen.PriceEurPerHour),
 				"alternativesCount", len(alternatives),
 			)
-			if chosen.Provider != "gcp" && chosen.Provider != "scaleway" && chosen.Provider != "hetzner" && chosen.Provider != "digitalocean" && chosen.Provider != "ovh" && chosen.Provider != "aws" && chosen.Provider != "azure" && chosen.Provider != "aruba" {
-				err := fmt.Errorf("recommendation provider is %q, only gcp, scaleway, hetzner, digitalocean, ovh, aws, azure, and aruba are supported", chosen.Provider)
+			if chosen.Provider != "gcp" && chosen.Provider != "scaleway" && chosen.Provider != "hetzner" && chosen.Provider != "digitalocean" && chosen.Provider != "ovh" && chosen.Provider != "aws" && chosen.Provider != "azure" && chosen.Provider != "aruba" && chosen.Provider != "upcloud" && chosen.Provider != "exoscale" && chosen.Provider != "seeweb" && chosen.Provider != "contabo" && chosen.Provider != "gcore" && chosen.Provider != "cherry_servers" && chosen.Provider != "clouding" && chosen.Provider != "ibm_cloud" {
+				err := fmt.Errorf("recommendation provider is %q, only gcp, scaleway, hetzner, digitalocean, ovh, aws, azure, aruba, upcloud, exoscale, seeweb, contabo, gcore, cherry_servers, clouding, ibm_cloud are supported", chosen.Provider)
 				logger.Error(err, "unsupported provider")
 				r.recordEvent(nodePool, corev1.EventTypeWarning, "UnsupportedProvider", err.Error())
 				return ctrl.Result{}, err
@@ -333,12 +335,6 @@ func (r *NodePoolReconciler) checkScaleDown(ctx context.Context, nodePool *cloud
 		return nil
 	}
 
-	// Check max spend guard (optional)
-	if err := r.checkMaxSpend(ctx, nodePool, readyNodeClaims, logger); err != nil {
-		logger.Info("skipping scale-down: max spend check failed", "error", err)
-		// Continue with other checks even if max spend check fails
-	}
-
 	now := time.Now()
 
 	// Check each Ready NodeClaim for disruption conditions
@@ -381,45 +377,33 @@ func (r *NodePoolReconciler) checkScaleDown(ctx context.Context, nodePool *cloud
 			}
 
 			if isEmpty {
-				// Check when node became empty (we'd need to track this, but for MVP we can use ReadyAt)
-				// For MVP, we'll check if node has been empty for the TTL duration
-				// This is simplified - in production you'd track when node became empty
-				if latestClaim.Status.Timestamps.ReadyAt != nil {
-					age := now.Sub(latestClaim.Status.Timestamps.ReadyAt.Time)
-					if age >= time.Duration(nodePool.Spec.Disruption.TTLSecondsAfterEmpty)*time.Second {
-						logger.Info("node empty for TTL, initiating deletion",
-							"nodeClaim", latestClaim.Name,
-							"age", age,
-							"ttl", nodePool.Spec.Disruption.TTLSecondsAfterEmpty,
-						)
-						r.recordEvent(nodePool, corev1.EventTypeNormal, "NodeEmpty", fmt.Sprintf("NodeClaim %s empty for TTL (age: %v)", latestClaim.Name, age))
-						if err := r.initiateDeletion(ctx, latestClaim, logger); err != nil {
-							logger.Error(err, "failed to initiate deletion", "nodeClaim", latestClaim.Name)
-							continue
-						}
+				if latestClaim.Status.Timestamps.EmptySince == nil {
+					latestClaim.Status.Timestamps.EmptySince = &metav1.Time{Time: now}
+					if err := r.Status().Update(ctx, latestClaim); err != nil {
+						logger.Error(err, "failed to set EmptySince", "nodeClaim", latestClaim.Name)
 					}
+				}
+				emptyDuration := now.Sub(latestClaim.Status.Timestamps.EmptySince.Time)
+				if emptyDuration >= time.Duration(nodePool.Spec.Disruption.TTLSecondsAfterEmpty)*time.Second {
+					logger.Info("node empty for TTL, initiating deletion",
+						"nodeClaim", latestClaim.Name,
+						"emptyDuration", emptyDuration,
+						"ttl", nodePool.Spec.Disruption.TTLSecondsAfterEmpty,
+					)
+					r.recordEvent(nodePool, corev1.EventTypeNormal, "NodeEmpty", fmt.Sprintf("NodeClaim %s empty for TTL (empty: %v)", latestClaim.Name, emptyDuration))
+					if err := r.initiateDeletion(ctx, latestClaim, logger); err != nil {
+						logger.Error(err, "failed to initiate deletion", "nodeClaim", latestClaim.Name)
+						continue
+					}
+				}
+			} else if latestClaim.Status.Timestamps.EmptySince != nil {
+				latestClaim.Status.Timestamps.EmptySince = nil
+				if err := r.Status().Update(ctx, latestClaim); err != nil {
+					logger.Error(err, "failed to clear EmptySince", "nodeClaim", latestClaim.Name)
 				}
 			}
 		}
 	}
-
-	return nil
-}
-
-// checkMaxSpend checks if total spend exceeds NodePool limits
-func (r *NodePoolReconciler) checkMaxSpend(ctx context.Context, nodePool *cloudburstv1alpha1.NodePool, nodeClaims []cloudburstv1alpha1.NodeClaim, logger logr.Logger) error {
-	// Calculate total spend
-	var totalSpend float64
-	for i := range nodeClaims {
-		totalSpend += nodeClaims[i].Spec.Chosen.PriceEurPerHour
-	}
-
-	// Check against limits (if maxPriceEurPerHour is set per node, we'd need to check differently)
-	// For MVP, we'll skip this check as it's optional
-	logger.Info("max spend check",
-		"totalSpend", totalSpend,
-		"nodeCount", len(nodeClaims),
-	)
 
 	return nil
 }
@@ -430,34 +414,25 @@ func (r *NodePoolReconciler) isNodeEmpty(ctx context.Context, nodeClaim *cloudbu
 		return false, nil
 	}
 
-	// List all pods
 	podList := &corev1.PodList{}
-	if err := r.List(ctx, podList); err != nil {
+	if err := r.List(ctx, podList, client.MatchingFields{"spec.nodeName": nodeClaim.Status.NodeName}); err != nil {
 		return false, fmt.Errorf("unable to list pods: %w", err)
 	}
 
-	// Check for pods on this node
 	for i := range podList.Items {
 		pod := &podList.Items[i]
-		if pod.Spec.NodeName != nodeClaim.Status.NodeName {
-			continue
-		}
 
-		// Skip daemonset pods
 		isDaemonSet := false
-		if pod.OwnerReferences != nil {
-			for _, owner := range pod.OwnerReferences {
-				if owner.Kind == "DaemonSet" {
-					isDaemonSet = true
-					break
-				}
+		for _, owner := range pod.OwnerReferences {
+			if owner.Kind == "DaemonSet" {
+				isDaemonSet = true
+				break
 			}
 		}
 		if isDaemonSet {
 			continue
 		}
 
-		// Found a non-daemonset pod
 		return false, nil
 	}
 
@@ -488,18 +463,30 @@ func (r *NodePoolReconciler) initiateDeletion(ctx context.Context, nodeClaim *cl
 
 // calculateDesiredCapacity calculates desired capacity from unschedulable pods
 // scoped to pods that match this NodePool (via cloudburst.io/nodepool or cloudburst.io/provider).
+// Pods are grouped by architecture so we never mix arm64 and amd64 pods in one capacity request.
+// The architecture group with the highest total demand (CPU+Memory) is returned.
 func (r *NodePoolReconciler) calculateDesiredCapacity(ctx context.Context, nodePool *cloudburstv1alpha1.NodePool) (planner.DesiredCapacity, error) {
-	// List all pods
 	podList := &corev1.PodList{}
 	if err := r.List(ctx, podList); err != nil {
 		return planner.DesiredCapacity{}, err
 	}
 
-	// Filter eligible pods and scope to this NodePool
 	eligiblePods := r.filterEligiblePodsForNodePool(podList.Items, nodePool)
 
-	// Calculate desired capacity
-	return planner.CalculateDesiredCapacity(eligiblePods), nil
+	archGroups := planner.GroupPodsByArch(eligiblePods)
+
+	var bestCapacity planner.DesiredCapacity
+	var bestDemand int64
+	for _, pods := range archGroups {
+		capacity := planner.CalculateDesiredCapacity(pods)
+		demand := capacity.CPUMilliTotal + capacity.MemBytesTotal
+		if demand > bestDemand {
+			bestDemand = demand
+			bestCapacity = capacity
+		}
+	}
+
+	return bestCapacity, nil
 }
 
 // filterEligiblePodsForNodePool filters pods that are eligible for demand detection
@@ -664,45 +651,57 @@ func (r *NodePoolReconciler) countActiveNodeClaimsWithReader(ctx context.Context
 	return count, nil
 }
 
-// getMinVCPUFromNodePool returns the minimum vCPU per node for this pool (from spec or default).
-func getMinVCPUFromNodePool(nodePool *cloudburstv1alpha1.NodePool) int32 {
-	if nodePool.Spec.Requirements.MinVCPU != nil && *nodePool.Spec.Requirements.MinVCPU > 0 {
-		return *nodePool.Spec.Requirements.MinVCPU
-	}
-	return DefaultMinVCPU
-}
-
-// getMinRAMGbFromNodePool returns the minimum RAM per node in GB for this pool (from spec or default).
-func getMinRAMGbFromNodePool(nodePool *cloudburstv1alpha1.NodePool) float64 {
-	if nodePool.Spec.Requirements.MinRAMGb != nil && *nodePool.Spec.Requirements.MinRAMGb > 0 {
-		return *nodePool.Spec.Requirements.MinRAMGb
-	}
-	return DefaultMinRAMGb
-}
-
-// vcpuFromDemand returns the minimum vCPU to request for a node that fits the demand; poolMin is the NodePool floor.
-func vcpuFromDemand(cpuMilli int64, poolMin int32) int32 {
-	need := int32((cpuMilli + 999) / 1000)
+// vcpuFromDemand returns the minimum vCPU to request for a node that fits the demand
+// plus DaemonSet/system overhead so the node has enough room for both.
+func vcpuFromDemand(cpuMilli int64, overheadMilli int64) int32 {
+	need := int32((cpuMilli + overheadMilli + 999) / 1000)
 	if need < 1 {
 		need = 1
-	}
-	if poolMin > need {
-		return poolMin
 	}
 	return need
 }
 
-// ramGbFromDemand returns the minimum RAM in GB to request for a node that fits the demand; poolMin is the NodePool floor.
-func ramGbFromDemand(memBytes int64, poolMin float64) float64 {
+// ramGbFromDemand returns the minimum RAM in GB to request for a node that fits the demand
+// plus DaemonSet/system overhead so the node has enough room for both.
+func ramGbFromDemand(memBytes int64, overheadBytes int64) float64 {
 	const bytesPerGb = 1024 * 1024 * 1024
-	needGb := float64((memBytes + bytesPerGb - 1) / bytesPerGb)
+	needGb := float64((memBytes + overheadBytes + bytesPerGb - 1) / bytesPerGb)
 	if needGb < 1 {
 		needGb = 1
 	}
-	if poolMin > needGb {
-		return poolMin
-	}
 	return needGb
+}
+
+// estimateDaemonSetOverhead sums resource requests from all DaemonSets in the cluster
+// and adds a fixed buffer for system daemons (kubelet, containerd, tailscale).
+func (r *NodePoolReconciler) estimateDaemonSetOverhead(ctx context.Context) (cpuMilli int64, memBytes int64) {
+	const (
+		systemCPUMilliFallback = 500
+		systemMemBytesFallback = 512 * 1024 * 1024
+		systemCPUMilli         = 300
+		systemMemBytes         = 256 * 1024 * 1024
+	)
+
+	dsList := &appsv1.DaemonSetList{}
+	if err := r.List(ctx, dsList); err != nil {
+		log.FromContext(ctx).Error(err, "failed to list DaemonSets for overhead estimation, using fallback")
+		return systemCPUMilliFallback, systemMemBytesFallback
+	}
+
+	for _, ds := range dsList.Items {
+		for _, c := range ds.Spec.Template.Spec.Containers {
+			if cpu, ok := c.Resources.Requests[corev1.ResourceCPU]; ok {
+				cpuMilli += cpu.MilliValue()
+			}
+			if mem, ok := c.Resources.Requests[corev1.ResourceMemory]; ok {
+				memBytes += mem.Value()
+			}
+		}
+	}
+
+	cpuMilli += systemCPUMilli
+	memBytes += systemMemBytes
+	return
 }
 
 // brokerReqToSummary converts a CloudBroker request to NodeClaim RecommendationRequestSummary for retry.
@@ -745,9 +744,25 @@ func (r *NodePoolReconciler) nodeClassSupportsProvider(nodeClass *cloudburstv1al
 	case "aws":
 		return nodeClass.Spec.AWS != nil && nodeClass.Spec.AWS.AMI != ""
 	case "azure":
-		return nodeClass.Spec.Azure != nil && nodeClass.Spec.Azure.SubscriptionID != "" && nodeClass.Spec.Azure.ResourceGroup != "" && nodeClass.Spec.Azure.SubnetID != ""
+		return nodeClass.Spec.Azure != nil && nodeClass.Spec.Azure.SubscriptionID != "" && nodeClass.Spec.Azure.ResourceGroup != ""
 	case "aruba":
 		return nodeClass.Spec.Aruba != nil && nodeClass.Spec.Aruba.ProjectID != ""
+	case "upcloud":
+		return nodeClass.Spec.UpCloud != nil && nodeClass.Spec.UpCloud.APITokenSecretRef != nil && nodeClass.Spec.UpCloud.APITokenSecretRef.Name != ""
+	case "exoscale":
+		return nodeClass.Spec.Exoscale != nil && nodeClass.Spec.Exoscale.APIKeySecretRef != nil && nodeClass.Spec.Exoscale.APIKeySecretRef.Name != ""
+	case "seeweb":
+		return nodeClass.Spec.Seeweb != nil && nodeClass.Spec.Seeweb.APITokenSecretRef != nil && nodeClass.Spec.Seeweb.APITokenSecretRef.Name != ""
+	case "contabo":
+		return nodeClass.Spec.Contabo != nil && ((nodeClass.Spec.Contabo.ClientIDSecretRef != nil && nodeClass.Spec.Contabo.ClientSecretSecretRef != nil) || (os.Getenv("CONTABO_CLIENT_ID") != "" && os.Getenv("CONTABO_CLIENT_SECRET") != ""))
+	case "gcore":
+		return nodeClass.Spec.Gcore != nil && nodeClass.Spec.Gcore.ProjectID > 0 && (nodeClass.Spec.Gcore.APIKeySecretRef != nil || os.Getenv("GCORE_API_KEY") != "")
+	case "cherry_servers":
+		return nodeClass.Spec.CherryServers != nil && nodeClass.Spec.CherryServers.ProjectID > 0 && (nodeClass.Spec.CherryServers.APITokenSecretRef != nil || os.Getenv("CHERRY_SERVERS_API_TOKEN") != "")
+	case "clouding":
+		return nodeClass.Spec.Clouding != nil && (nodeClass.Spec.Clouding.APIKeySecretRef != nil || os.Getenv("CLOUDING_API_KEY") != "")
+	case "ibm_cloud":
+		return nodeClass.Spec.IBMCloud != nil && nodeClass.Spec.IBMCloud.ResourceGroup != "" && (nodeClass.Spec.IBMCloud.APIKeySecretRef != nil || os.Getenv("IBMCLOUD_API_KEY") != "")
 	default:
 		return false
 	}
@@ -830,6 +845,16 @@ func (r *NodePoolReconciler) recordEvent(obj client.Object, eventType, reason, m
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *NodePoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Pod{}, "spec.nodeName", func(obj client.Object) []string {
+		pod := obj.(*corev1.Pod)
+		if pod.Spec.NodeName == "" {
+			return nil
+		}
+		return []string{pod.Spec.NodeName}
+	}); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cloudburstv1alpha1.NodePool{}).
 		Owns(&cloudburstv1alpha1.NodeClaim{}).

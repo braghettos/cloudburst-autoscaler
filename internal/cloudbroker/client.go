@@ -64,6 +64,8 @@ type RecommendationRequest struct {
 
 	// ExcludedInstanceTypes excludes instance types (e.g. after provisioning failure)
 	ExcludedInstanceTypes []string `json:"excluded_instance_types,omitempty"`
+	// ExcludedInstanceTypePrefixes excludes instance types whose name starts with any prefix (e.g. "Standard_B")
+	ExcludedInstanceTypePrefixes []string `json:"excluded_instance_type_prefixes,omitempty"`
 }
 
 // RecommendationExplain is the nested explain object from CloudBroker (contains price and TCO breakdown)
@@ -202,7 +204,8 @@ func (c *Client) recommendOnce(ctx context.Context, req *RecommendationRequest) 
 	}
 
 	if len(apiResp.Recommendations) == 0 {
-		return nil, fmt.Errorf("no recommendations returned")
+		reqJSON, _ := json.MarshalIndent(req, "", "  ")
+		return nil, fmt.Errorf("no recommendations returned — request: %s — response: %s", string(reqJSON), string(bodyBytes))
 	}
 
 	limit := req.Limit

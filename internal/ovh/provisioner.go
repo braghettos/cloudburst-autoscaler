@@ -19,10 +19,12 @@ package ovh
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
-	"time"
 
+	"github.com/diegobraga/cloudburst-autoscaler/internal/provutil"
 	"github.com/ovh/go-ovh/ovh"
 )
 
@@ -31,10 +33,6 @@ const (
 	InstanceIDPrefix = "ovh/"
 	// DefaultImageID is the default Ubuntu 22.04 image ID for OVH Public Cloud (EU; may need adjustment per region)
 	DefaultImageID = "Ubuntu 22.04"
-	// MaxRetries is the maximum number of retry attempts
-	MaxRetries = 3
-	// RetryDelay is the initial delay between retries
-	RetryDelay = 2 * time.Second
 )
 
 // ovhInstanceCreateRequest is the body for POST /cloud/project/{serviceName}/instance
@@ -93,31 +91,16 @@ func NewProvisioner(ctx context.Context, endpoint, appKey, appSecret, consumerKe
 // CreateInstance creates an OVH Cloud instance with the given name, flavor (instance type), region, and cloud-init script.
 // Returns instanceID in the form "ovh/<projectId>/<instanceId>".
 func (p *Provisioner) CreateInstance(ctx context.Context, name, flavorID, region, startupScript, imageFromConfig string) (string, error) {
-	var lastErr error
-
-	for attempt := 0; attempt <= MaxRetries; attempt++ {
-		if attempt > 0 {
-			waitTime := RetryDelay * time.Duration(1<<uint(attempt-1))
-			select {
-			case <-ctx.Done():
-				return "", fmt.Errorf("context cancelled: %w", ctx.Err())
-			case <-time.After(waitTime):
-			}
-		}
-
-		instanceID, err := p.createInstanceOnce(ctx, name, flavorID, region, startupScript, imageFromConfig)
-		if err == nil {
-			return instanceID, nil
-		}
-
-		if !isRetryableError(err) {
-			return "", err
-		}
-
-		lastErr = err
+	var instanceID string
+	err := provutil.WithRetry(ctx, provutil.MaxRetries, provutil.RetryDelay, provutil.IsRetryableError, func() error {
+		var retryErr error
+		instanceID, retryErr = p.createInstanceOnce(ctx, name, flavorID, region, startupScript, imageFromConfig)
+		return retryErr
+	})
+	if err != nil {
+		return "", err
 	}
-
-	return "", fmt.Errorf("failed after %d attempts: %w", MaxRetries+1, lastErr)
+	return instanceID, nil
 }
 
 func (p *Provisioner) createInstanceOnce(ctx context.Context, name, flavorID, region, startupScript, imageFromConfig string) (string, error) {
@@ -161,31 +144,9 @@ func (p *Provisioner) createInstanceOnce(ctx context.Context, name, flavorID, re
 
 // DeleteInstance deletes an OVH Cloud instance. instanceID must be in the form "ovh/<projectId>/<instanceId>".
 func (p *Provisioner) DeleteInstance(ctx context.Context, instanceID string) error {
-	var lastErr error
-
-	for attempt := 0; attempt <= MaxRetries; attempt++ {
-		if attempt > 0 {
-			waitTime := RetryDelay * time.Duration(1<<uint(attempt-1))
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("context cancelled: %w", ctx.Err())
-			case <-time.After(waitTime):
-			}
-		}
-
-		err := p.deleteInstanceOnce(ctx, instanceID)
-		if err == nil {
-			return nil
-		}
-
-		if !isRetryableError(err) {
-			return err
-		}
-
-		lastErr = err
-	}
-
-	return fmt.Errorf("failed after %d attempts: %w", MaxRetries+1, lastErr)
+	return provutil.WithRetry(ctx, provutil.MaxRetries, provutil.RetryDelay, provutil.IsRetryableError, func() error {
+		return p.deleteInstanceOnce(ctx, instanceID)
+	})
 }
 
 func (p *Provisioner) deleteInstanceOnce(ctx context.Context, instanceID string) error {
@@ -196,6 +157,10 @@ func (p *Provisioner) deleteInstanceOnce(ctx context.Context, instanceID string)
 
 	path := fmt.Sprintf("/cloud/project/%s/instance/%s", p.projectID, id)
 	if err := p.client.DeleteWithContext(ctx, path, nil); err != nil {
+		var apiErr *ovh.APIError
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusNotFound {
+			return nil
+		}
 		return fmt.Errorf("failed to delete instance: %w", err)
 	}
 
@@ -296,17 +261,8 @@ func GenerateInstanceName(nodeClaimName string) string {
 	return nodeClaimName
 }
 
-// parseInstanceID parses "ovh/<projectId>/<instanceId>" into projectId and instanceId.
 func parseInstanceID(instanceID string) (string, string, error) {
-	if !strings.HasPrefix(instanceID, InstanceIDPrefix) {
-		return "", "", fmt.Errorf("invalid OVH instance ID format: %s", instanceID)
-	}
-	rest := strings.TrimPrefix(instanceID, InstanceIDPrefix)
-	parts := strings.SplitN(rest, "/", 2)
-	if len(parts) != 2 {
-		return "", "", fmt.Errorf("invalid OVH instance ID format: %s", instanceID)
-	}
-	return parts[0], parts[1], nil
+	return provutil.ParseInstanceID(instanceID, InstanceIDPrefix)
 }
 
 // ovhFlavor represents a flavor from the OVH API
@@ -390,18 +346,4 @@ func looksLikeUUID(s string) bool {
 		}
 	}
 	return true
-}
-
-func isRetryableError(err error) bool {
-	if err == nil {
-		return false
-	}
-	errStr := err.Error()
-	retryable := []string{"rate limit", "quota", "temporary", "timeout", "deadline exceeded", "unavailable", "503", "502", "500"}
-	for _, r := range retryable {
-		if strings.Contains(strings.ToLower(errStr), r) {
-			return true
-		}
-	}
-	return false
 }

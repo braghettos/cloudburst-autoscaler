@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -251,7 +252,7 @@ func TestRecommend_NoRecommendations(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty recommendations, got nil")
 	}
-	if err.Error() != "failed after 4 attempts: no recommendations returned" {
+	if !strings.Contains(err.Error(), "failed after 4 attempts") || !strings.Contains(err.Error(), "no recommendations returned") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }

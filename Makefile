@@ -188,17 +188,25 @@ scaleway-cleanup: ## Delete orphaned cb-* Scaleway instances across zones. Requi
 digitalocean-cleanup: ## Delete orphaned cb-* DigitalOcean droplets. Requires DIGITALOCEAN_API_TOKEN (from .env).
 	@[ -f .env ] && set -a && . .env && set +a; bash hack/digitalocean-cleanup.sh
 
+.PHONY: upcloud-cleanup
+upcloud-cleanup: ## Delete orphaned cb-* UpCloud servers. Requires UPCLOUD_API_TOKEN (from .env).
+	@[ -f .env ] && set -a && . .env && set +a; bash hack/upcloud-cleanup.sh
+
 .PHONY: azure-cleanup
 azure-cleanup: ## Delete orphaned cb-* Azure VMs in resource group. Requires AZURE_* env vars (from .env).
 	@[ -f .env ] && set -a && . .env && set +a; bash hack/azure-cleanup.sh
 
 .PHONY: cleanup-all
-cleanup-all: ## Delete orphaned cb-* instances across all providers (GCP, AWS, Azure, Hetzner, Scaleway, DigitalOcean, OVH).
+cleanup-all: ## Delete orphaned cb-* instances across all providers (GCP, AWS, Azure, Hetzner, Scaleway, DigitalOcean, UpCloud, Aruba, OVH).
 	@[ -f .env ] && set -a && . .env && set +a; bash hack/cleanup-all-providers.sh
 
 .PHONY: run-all-e2e
-run-all-e2e: ## Run E2E tests for all providers with credentials set (Hetzner, Scaleway, DigitalOcean, OVH, Azure, GCP, AWS).
+run-all-e2e: ## Run E2E tests for all providers with credentials set (all 10 providers + DR).
 	@bash hack/run-all-e2e.sh
+
+.PHONY: simulate-dr
+simulate-dr: ## Simulate disaster recovery (Hetzner outage -> Scaleway failover). Requires --with-api-mock.
+	@bash hack/simulate-disaster-recovery.sh --with-api-mock
 
 .PHONY: create-secrets
 create-secrets: create-namespace ## Create required secrets (GCP credentials and Tailscale auth key). Reads from .env file or command line.

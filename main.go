@@ -133,6 +133,21 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "DemandDetector")
 		os.Exit(1)
 	}
+	if err := ctrl.NewWebhookManagedBy(mgr).
+		For(&cloudburstv1alpha1.NodeClass{}).
+		WithValidator(&cloudburstv1alpha1.NodeClassValidator{}).
+		Complete(); err != nil {
+		setupLog.Error(err, "unable to create webhook", "webhook", "NodeClass")
+		os.Exit(1)
+	}
+	if err := ctrl.NewWebhookManagedBy(mgr).
+		For(&cloudburstv1alpha1.NodePool{}).
+		WithDefaulter(&cloudburstv1alpha1.NodePoolDefaulter{}).
+		WithValidator(&cloudburstv1alpha1.NodePoolValidator{}).
+		Complete(); err != nil {
+		setupLog.Error(err, "unable to create webhook", "webhook", "NodePool")
+		os.Exit(1)
+	}
 	//+kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

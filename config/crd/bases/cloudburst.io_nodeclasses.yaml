@@ -230,8 +230,9 @@ spec:
                       NIC
                     type: string
                   subnetID:
-                    description: SubnetID is the full resource ID of the subnet for
-                      the VM NIC (e.g. /subscriptions/.../resourceGroups/.../providers/Microsoft.Network/virtualNetworks/.../subnets/...)
+                    description: |-
+                      SubnetID is the full resource ID of the subnet for the VM NIC (e.g. /subscriptions/.../resourceGroups/.../providers/Microsoft.Network/virtualNetworks/.../subnets/...).
+                      When empty, the provisioner auto-creates a VNet and subnet (cloudburst-vnet/default) in the resource group.
                     type: string
                   subscriptionID:
                     description: SubscriptionID is the Azure subscription ID
@@ -259,7 +260,6 @@ spec:
                     x-kubernetes-map-type: atomic
                 required:
                 - resourceGroup
-                - subnetID
                 - subscriptionID
                 type: object
               bootstrap:
@@ -268,6 +268,178 @@ spec:
                   kubernetesVersion:
                     description: KubernetesVersion is the Kubernetes version to use
                       (optional)
+                    type: string
+                type: object
+              cherryServers:
+                description: CherryServers configuration (used when NodeClaim Chosen.Provider
+                  is cherry_servers)
+                properties:
+                  apiTokenSecretRef:
+                    description: APITokenSecretRef references a secret containing
+                      the Cherry Servers API token.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  image:
+                    description: 'Image is the Cherry Servers image slug (default:
+                      Ubuntu 22.04).'
+                    type: string
+                  projectID:
+                    description: ProjectID is the Cherry Servers project ID (required).
+                    format: int64
+                    type: integer
+                  region:
+                    description: Region is the Cherry Servers region (e.g. "eu-lt-1",
+                      "eu-nl-1").
+                    type: string
+                required:
+                - projectID
+                type: object
+              clouding:
+                description: Clouding configuration (used when NodeClaim Chosen.Provider
+                  is clouding)
+                properties:
+                  apiKeySecretRef:
+                    description: APIKeySecretRef references a secret containing the
+                      Clouding.io API key.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  firewallId:
+                    description: FirewallID is the default firewall ID for new servers
+                      (optional; provisioner fetches one if empty).
+                    type: string
+                  image:
+                    description: 'Image is the Clouding image (default: Ubuntu 22.04).'
+                    type: string
+                  region:
+                    description: Region is the Clouding region (e.g. "es-bcn-1").
+                      Single region (Barcelona).
+                    type: string
+                type: object
+              contabo:
+                description: Contabo configuration (used when NodeClaim Chosen.Provider
+                  is contabo)
+                properties:
+                  apiPasswordSecretRef:
+                    description: APIPasswordSecretRef references a secret containing
+                      the Contabo API password.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  apiUserSecretRef:
+                    description: APIUserSecretRef references a secret containing the
+                      Contabo API user.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  clientIDSecretRef:
+                    description: ClientIDSecretRef references a secret containing
+                      the Contabo OAuth2 client ID.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  clientSecretSecretRef:
+                    description: ClientSecretSecretRef references a secret containing
+                      the Contabo OAuth2 client secret.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  image:
+                    description: 'Image is the Contabo image ID (default: Ubuntu 22.04).'
+                    type: string
+                  region:
+                    description: Region is the Contabo region (e.g. "eu-de-1", "eu-de-2").
                     type: string
                 type: object
               digitalocean:
@@ -303,6 +475,106 @@ spec:
                     description: Region is the DigitalOcean region slug (optional
                       when region comes from CloudBroker recommendation; used as fallback)
                     type: string
+                type: object
+              exoscale:
+                description: Exoscale configuration (used when NodeClaim Chosen.Provider
+                  is exoscale)
+                properties:
+                  apiKeySecretRef:
+                    description: |-
+                      APIKeySecretRef references a secret containing the Exoscale API key.
+                      Secret must have key "EXOSCALE_API_KEY".
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  apiSecretSecretRef:
+                    description: |-
+                      APISecretSecretRef references a secret containing the Exoscale API secret.
+                      Secret must have key "EXOSCALE_API_SECRET".
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  diskSizeGB:
+                    description: 'DiskSizeGB is the disk size in GiB (default: 10).'
+                    format: int64
+                    type: integer
+                  image:
+                    description: 'Image is the Exoscale template name or ID (default:
+                      Linux Ubuntu 22.04 LTS 64-bit).'
+                    type: string
+                  zone:
+                    description: Zone is the Exoscale zone (optional when region comes
+                      from CloudBroker recommendation; used as fallback)
+                    type: string
+                type: object
+              gcore:
+                description: Gcore configuration (used when NodeClaim Chosen.Provider
+                  is gcore)
+                properties:
+                  apiKeySecretRef:
+                    description: APIKeySecretRef references a secret containing the
+                      Gcore API key.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  image:
+                    description: 'Image is the Gcore image ID or name (default: Ubuntu
+                      22.04).'
+                    type: string
+                  projectID:
+                    description: ProjectID is the Gcore project ID (required).
+                    format: int64
+                    type: integer
+                  region:
+                    description: Region is the Gcore region (e.g. "lux-1", "fra-1").
+                    type: string
+                required:
+                - projectID
                 type: object
               gcp:
                 description: GCP configuration (used when NodeClaim Chosen.Provider
@@ -369,6 +641,54 @@ spec:
                       (optional when region comes from CloudBroker recommendation;
                       used as fallback)
                     type: string
+                type: object
+              ibmCloud:
+                description: IBMCloud configuration (used when NodeClaim Chosen.Provider
+                  is ibm_cloud)
+                properties:
+                  apiKeySecretRef:
+                    description: APIKeySecretRef references a secret containing the
+                      IBM Cloud API key.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  image:
+                    description: 'Image is the image ID or name (default: Ubuntu 22.04).'
+                    type: string
+                  region:
+                    description: Region is the IBM Cloud region (e.g. "eu-de", "us-south").
+                    type: string
+                  resourceGroup:
+                    description: ResourceGroup is the IBM Cloud resource group name
+                      or ID.
+                    type: string
+                  securityGroups:
+                    description: SecurityGroups are VPC security group IDs (optional).
+                    items:
+                      type: string
+                    type: array
+                  subnetID:
+                    description: SubnetID is the VPC subnet ID for instances. Optional;
+                      when empty, VPC and subnet are auto-created (same approach as
+                      Azure).
+                    type: string
+                required:
+                - resourceGroup
                 type: object
               join:
                 description: Join configuration for joining the Kubernetes cluster
@@ -528,6 +848,41 @@ spec:
                       from CloudBroker recommendation; used as fallback)
                     type: string
                 type: object
+              seeweb:
+                description: Seeweb configuration (used when NodeClaim Chosen.Provider
+                  is seeweb)
+                properties:
+                  apiTokenSecretRef:
+                    description: |-
+                      APITokenSecretRef references a secret containing the Seeweb API token (X-APITOKEN header).
+                      Secret must have key "SEEWEB_API_TOKEN" or the specified key.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  datacenter:
+                    description: Datacenter is the default Seeweb datacenter slug
+                      (e.g. "it-mi2", "it-fr2", "ch-lug1", "bg-sof1").
+                    type: string
+                  image:
+                    description: 'Image is the Seeweb image name (default: "Ubuntu
+                      22.04 LTS").'
+                    type: string
+                type: object
               tailscale:
                 description: Tailscale configuration for VPN connectivity
                 properties:
@@ -582,12 +937,107 @@ spec:
                       Nodes are removed from the tailnet when they run `tailscale logout` (e.g. on VM shutdown).
                     type: boolean
                 type: object
+              upcloud:
+                description: UpCloud configuration (used when NodeClaim Chosen.Provider
+                  is upcloud)
+                properties:
+                  apiTokenSecretRef:
+                    description: |-
+                      APITokenSecretRef references a secret containing the UpCloud API token.
+                      Secret must have key "UPCLOUD_API_TOKEN" or "UPCLOUD_TOKEN".
+                      Create at hub.upcloud.com/account/api-tokens.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        description: |-
+                          Name of the referent.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  image:
+                    description: 'Image is the UpCloud storage template UUID for Ubuntu
+                      (default: Ubuntu 22.04 template).'
+                    type: string
+                  zone:
+                    description: Zone is the UpCloud zone (optional when region comes
+                      from CloudBroker recommendation; used as fallback)
+                    type: string
+                type: object
             required:
             - join
             - tailscale
             type: object
           status:
             description: NodeClassStatus defines the observed state of NodeClass
+            properties:
+              conditions:
+                description: Conditions represent the latest available observations
+                  of the NodeClass's state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
             type: object
         type: object
     served: true

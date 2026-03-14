@@ -20,10 +20,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
+
+	"github.com/diegobraga/cloudburst-autoscaler/internal/metrics"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/provutil"
 )
 
 const (
@@ -76,10 +81,36 @@ type CreateKeyResponse struct {
 	Key string `json:"key"`
 }
 
+// apiError represents a non-2xx response from the Tailscale API.
+type apiError struct {
+	statusCode int
+	message    string
+}
+
+func (e *apiError) Error() string {
+	return fmt.Sprintf("tailscale API %d: %s", e.statusCode, e.message)
+}
+
+// isRetryable returns true for transient errors: network/transport failures
+// and 5xx server errors.
+func isRetryable(err error) bool {
+	var ae *apiError
+	if errors.As(err, &ae) {
+		return ae.statusCode >= 500
+	}
+	var urlErr *url.Error
+	return errors.As(err, &urlErr)
+}
+
 // CreateEphemeralKey creates a single-use ephemeral auth key for a device.
 // The key is not reusable and nodes using it are removed from the tailnet when they logout.
 // hostname is optional (can be empty); some Tailscale backends use it for display.
 func (c *Client) CreateEphemeralKey(ctx context.Context, hostname string) (authKey string, err error) {
+	start := time.Now()
+	defer func() {
+		metrics.TailscaleRequestDurationSeconds.Observe(time.Since(start).Seconds())
+	}()
+
 	reqBody := CreateKeyRequest{
 		Capabilities: KeyCapabilities{
 			Devices: KeyDeviceCreate{
@@ -96,31 +127,39 @@ func (c *Client) CreateEphemeralKey(ctx context.Context, hostname string) (authK
 		return "", fmt.Errorf("marshal create key request: %w", err)
 	}
 
-	url := apiBaseURL + "/tailnet/-/keys"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	var result string
+	err = provutil.WithRetry(ctx, 3, time.Second, isRetryable, func() error {
+		endpoint := apiBaseURL + "/tailnet/-/keys"
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if err != nil {
+			return fmt.Errorf("create request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+c.apiToken)
+
+		resp, err := c.client.Do(req)
+		if err != nil {
+			return fmt.Errorf("request: %w", err)
+		}
+		defer resp.Body.Close()
+
+		respBody, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+			return &apiError{statusCode: resp.StatusCode, message: string(respBody)}
+		}
+
+		var keyResp CreateKeyResponse
+		if err := json.Unmarshal(respBody, &keyResp); err != nil {
+			return fmt.Errorf("unmarshal response: %w", err)
+		}
+		if keyResp.Key == "" {
+			return fmt.Errorf("tailscale API returned empty key")
+		}
+		result = keyResp.Key
+		return nil
+	})
 	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
+		return "", err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.apiToken)
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("tailscale API %s: %s", resp.Status, string(respBody))
-	}
-
-	var keyResp CreateKeyResponse
-	if err := json.Unmarshal(respBody, &keyResp); err != nil {
-		return "", fmt.Errorf("unmarshal response: %w", err)
-	}
-	if keyResp.Key == "" {
-		return "", fmt.Errorf("tailscale API returned empty key")
-	}
-	return keyResp.Key, nil
+	return result, nil
 }

@@ -233,6 +233,7 @@ Or from the UI repo: `cd ../cloudburst-autoscaler-ui && make run`. For in-cluste
 ./hack/integration-test-e2e-aws.sh
 ./hack/integration-test-e2e-azure.sh
 ./hack/integration-test-e2e-aruba.sh
+./hack/integration-test-e2e-upcloud.sh
 
 # All-providers: full E2E in one Kind cluster with all enabled providers from .env
 ./hack/integration-test-e2e-all-providers.sh
@@ -288,6 +289,7 @@ Or from the UI repo: `cd ../cloudburst-autoscaler-ui && make run`. For in-cluste
 │   ├── integration-test-e2e-scaleway.sh  # E2E test (Scaleway)
 │   ├── integration-test-e2e-aws.sh       # E2E test (AWS EC2)
 │   ├── integration-test-e2e-azure.sh     # E2E test (Azure VM)
+│   ├── integration-test-e2e-upcloud.sh   # E2E test (UpCloud)
 │   ├── integration-test-e2e-all-providers.sh  # Full E2E with all enabled providers
 │   ├── integration-test-e2e-ui.sh   # E2E test for CloudBurst UI
 │   └── run-all-e2e.sh               # Run per-provider E2E tests sequentially

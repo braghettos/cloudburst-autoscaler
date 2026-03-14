@@ -25,8 +25,9 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
+	cberrors "github.com/diegobraga/cloudburst-autoscaler/internal/errors"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/provutil"
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 )
 
@@ -35,10 +36,6 @@ const (
 	InstanceIDPrefix = "hetzner/"
 	// DefaultImage is the default Ubuntu 22.04 image for Hetzner Cloud
 	DefaultImage = "ubuntu-22.04"
-	// MaxRetries is the maximum number of retry attempts
-	MaxRetries = 3
-	// RetryDelay is the initial delay between retries
-	RetryDelay = 2 * time.Second
 )
 
 // Provisioner handles Hetzner Cloud server provisioning
@@ -87,31 +84,20 @@ func (p *Provisioner) CreateInstance(ctx context.Context, name, serverType, loca
 		return "", altErr
 	}
 
-	// Retry transient errors.
-	var lastErr error
-	for attempt := 0; attempt <= MaxRetries; attempt++ {
-		if attempt > 0 {
-			waitTime := RetryDelay * time.Duration(1<<uint(attempt-1))
-			select {
-			case <-ctx.Done():
-				return "", fmt.Errorf("context cancelled: %w", ctx.Err())
-			case <-time.After(waitTime):
-			}
-		}
-
-		instanceID, err := p.createInstanceOnce(ctx, name, serverType, location, startupScript, imageFromConfig)
-		if err == nil {
-			return instanceID, nil
-		}
-
-		if !isRetryableError(err) {
-			return "", err
-		}
-
-		lastErr = err
+	// For non-location errors, check retryability before entering retry loop.
+	if !isRetryableError(err) {
+		return "", err
 	}
-
-	return "", fmt.Errorf("failed after %d attempts: %w", MaxRetries+1, lastErr)
+	var retInstanceID string
+	retryErr := provutil.WithRetry(ctx, provutil.MaxRetries, provutil.RetryDelay, isRetryableError, func() error {
+		var retryErr error
+		retInstanceID, retryErr = p.createInstanceOnce(ctx, name, serverType, location, startupScript, imageFromConfig)
+		return retryErr
+	})
+	if retryErr != nil {
+		return "", retryErr
+	}
+	return retInstanceID, nil
 }
 
 // createInstanceOnce makes a single attempt to create a server
@@ -136,6 +122,9 @@ func (p *Provisioner) createInstanceOnce(ctx context.Context, name, serverType, 
 	}
 
 	result, resp, err := p.client.Server.Create(ctx, opts)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
 	if err != nil {
 		// Include full error and response for debugging (Hetzner API sometimes returns generic "server_error")
 		errMsg := err.Error()
@@ -174,31 +163,9 @@ func (p *Provisioner) createInstanceOnce(ctx context.Context, name, serverType, 
 
 // DeleteInstance deletes a Hetzner Cloud server. instanceID must be in the form "hetzner/<location>/<server-id>".
 func (p *Provisioner) DeleteInstance(ctx context.Context, instanceID string) error {
-	var lastErr error
-
-	for attempt := 0; attempt <= MaxRetries; attempt++ {
-		if attempt > 0 {
-			waitTime := RetryDelay * time.Duration(1<<uint(attempt-1))
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("context cancelled: %w", ctx.Err())
-			case <-time.After(waitTime):
-			}
-		}
-
-		err := p.deleteInstanceOnce(ctx, instanceID)
-		if err == nil {
-			return nil
-		}
-
-		if !isRetryableError(err) {
-			return err
-		}
-
-		lastErr = err
-	}
-
-	return fmt.Errorf("failed after %d attempts: %w", MaxRetries+1, lastErr)
+	return provutil.WithRetry(ctx, provutil.MaxRetries, provutil.RetryDelay, isRetryableError, func() error {
+		return p.deleteInstanceOnce(ctx, instanceID)
+	})
 }
 
 // deleteInstanceOnce makes a single attempt to delete a server.
@@ -252,6 +219,10 @@ func (p *Provisioner) IsInstanceRunning(ctx context.Context, instanceID string) 
 	if err != nil {
 		return false, err
 	}
+	switch status {
+	case hcloud.ServerStatusDeleting, hcloud.ServerStatusUnknown:
+		return false, &cberrors.InstanceFailedError{Reason: fmt.Sprintf("server status: %s", status)}
+	}
 	return status == hcloud.ServerStatusRunning, nil
 }
 
@@ -266,21 +237,16 @@ func GenerateInstanceName(nodeClaimName string) string {
 	return nodeClaimName
 }
 
-// parseInstanceID parses "hetzner/<location>/<server-id>" into location and server ID.
 func parseInstanceID(instanceID string) (string, int64, error) {
-	if !strings.HasPrefix(instanceID, InstanceIDPrefix) {
-		return "", 0, fmt.Errorf("invalid Hetzner instance ID format: %s", instanceID)
+	location, idStr, err := provutil.ParseInstanceID(instanceID, InstanceIDPrefix)
+	if err != nil {
+		return "", 0, err
 	}
-	rest := strings.TrimPrefix(instanceID, InstanceIDPrefix)
-	parts := strings.SplitN(rest, "/", 2)
-	if len(parts) != 2 {
-		return "", 0, fmt.Errorf("invalid Hetzner instance ID format: %s", instanceID)
-	}
-	serverID, err := strconv.ParseInt(parts[1], 10, 64)
+	serverID, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
 		return "", 0, fmt.Errorf("invalid server ID in instance ID %s: %w", instanceID, err)
 	}
-	return parts[0], serverID, nil
+	return location, serverID, nil
 }
 
 // isLocationDisabledError returns true when the Hetzner API reports the location as disabled.
@@ -368,43 +334,15 @@ func isUniquenessError(err error) bool {
 	return strings.Contains(s, "uniqueness_error") || strings.Contains(s, "server name is already used")
 }
 
-// isRetryableError checks if an error is retryable.
-// Permanent errors like resource_unavailable (location disabled) are excluded.
 func isRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
-
 	errStr := strings.ToLower(err.Error())
-
-	// Non-retryable patterns: permanent failures that will not resolve with retries
-	nonRetryable := []string{
-		"resource_unavailable",
-		"location disabled",
-	}
-	for _, nr := range nonRetryable {
+	for _, nr := range []string{"resource_unavailable", "location disabled"} {
 		if strings.Contains(errStr, nr) {
 			return false
 		}
 	}
-
-	retryableErrors := []string{
-		"rate limit",
-		"quota",
-		"temporary",
-		"timeout",
-		"deadline exceeded",
-		"unavailable",
-		"503",
-		"502",
-		"500",
-	}
-
-	for _, retryable := range retryableErrors {
-		if strings.Contains(errStr, retryable) {
-			return true
-		}
-	}
-
-	return false
+	return provutil.IsRetryableError(err)
 }

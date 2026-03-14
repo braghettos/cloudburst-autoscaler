@@ -193,6 +193,24 @@ func (r *NodeClaimReconciler) handleQuotaExceeded(ctx context.Context, nodeClaim
 func (r *NodeClaimReconciler) handlePending(ctx context.Context, nodeClaim *cloudburstv1alpha1.NodeClaim, logger logr.Logger) (ctrl.Result, error) {
 	logger.Info("handling Pending phase", "nodeClaim", nodeClaim.Name)
 
+	// If InstanceID is already set (e.g. from a previous reconcile that created but failed to update phase),
+	// transition to Provisioning to avoid creating a duplicate instance.
+	if nodeClaim.Status.InstanceID != "" {
+		logger.Info("InstanceID already set, transitioning to Provisioning to avoid duplicate creation",
+			"instanceID", nodeClaim.Status.InstanceID)
+		apply := func(nc *cloudburstv1alpha1.NodeClaim) {
+			nc.Status.Phase = cloudburstv1alpha1.NodeClaimPhaseProvisioning
+			if nc.Status.Timestamps.CreatedAt.IsZero() {
+				nc.Status.Timestamps.CreatedAt = metav1.Now()
+			}
+			nc.Status.Timestamps.LastTransition = metav1.Now()
+		}
+		if err := r.statusUpdateWithRetry(ctx, nodeClaim, apply, logger); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: r.Config.RequeueInterval}, nil
+	}
+
 	// Get NodeClass
 	nodeClass := &cloudburstv1alpha1.NodeClass{}
 	nodeClassKey := client.ObjectKey{
@@ -211,7 +229,9 @@ func (r *NodeClaimReconciler) handlePending(ctx context.Context, nodeClaim *clou
 		err := fmt.Errorf("NodeClaim %s spec.chosen.provider is required", nodeClaim.Name)
 		logger.Error(err, "missing provider")
 		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InvalidConfiguration", err.Error())
-		r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error())
+		if statusErr := r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error()); statusErr != nil {
+			return ctrl.Result{}, errors.Join(err, statusErr)
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -220,7 +240,9 @@ func (r *NodeClaimReconciler) handlePending(ctx context.Context, nodeClaim *clou
 	if err != nil {
 		logger.Error(err, "unable to get Tailscale auth key")
 		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "TailscaleAuthKeyError", fmt.Sprintf("Failed to get Tailscale auth key: %v", err))
-		r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error())
+		if statusErr := r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error()); statusErr != nil {
+			return ctrl.Result{}, errors.Join(err, statusErr)
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -238,7 +260,9 @@ func (r *NodeClaimReconciler) handlePending(ctx context.Context, nodeClaim *clou
 	if err != nil {
 		logger.Error(err, "unable to get join command")
 		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "JoinCommandError", fmt.Sprintf("Failed to get join command: %v", err))
-		r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error())
+		if statusErr := r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error()); statusErr != nil {
+			return ctrl.Result{}, errors.Join(err, statusErr)
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -249,7 +273,9 @@ func (r *NodeClaimReconciler) handlePending(ctx context.Context, nodeClaim *clou
 	if hostApiServer == "" {
 		err := fmt.Errorf("NodeClass %s spec.join.hostApiServer is required (e.g. https://<HOST_TAILSCALE_IP>:6443)", nodeClass.Name)
 		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "HostApiServerRequired", err.Error())
-		r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error())
+		if statusErr := r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error()); statusErr != nil {
+			return ctrl.Result{}, errors.Join(err, statusErr)
+		}
 		return ctrl.Result{}, err
 	}
 	if !strings.HasPrefix(hostApiServer, "https://") && !strings.HasPrefix(hostApiServer, "http://") {
@@ -302,7 +328,9 @@ func (r *NodeClaimReconciler) handlePending(ctx context.Context, nodeClaim *clou
 	if err != nil {
 		logger.Error(err, "invalid provisioning params")
 		r.recordEvent(nodeClaim, corev1.EventTypeWarning, "InvalidConfiguration", err.Error())
-		r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error())
+		if statusErr := r.updateStatus(ctx, nodeClaim, cloudburstv1alpha1.NodeClaimPhaseFailed, err.Error()); statusErr != nil {
+			return ctrl.Result{}, errors.Join(err, statusErr)
+		}
 		return ctrl.Result{}, err
 	}
 	prov, err := provisioner.NewFromNodeClass(ctx, provider, nodeClass, nodeClaim.Namespace, r, regionOrZone)
@@ -409,24 +437,28 @@ func (r *NodeClaimReconciler) handlePending(ctx context.Context, nodeClaim *clou
 		return ctrl.Result{}, err
 	}
 
-	// Update NodeClaim status with instance ID and the recommendation used for provisioning
-	nodeClaim.Status.InstanceID = instanceID
-	nodeClaim.Status.RecommendationUsed = &cloudburstv1alpha1.InstanceDetails{
-		Provider:        nodeClaim.Spec.Chosen.Provider,
-		Region:          nodeClaim.Spec.Chosen.Region,
-		InstanceType:    nodeClaim.Spec.Chosen.InstanceType,
-		VCPU:            nodeClaim.Spec.Chosen.VCPU,
-		RamGb:           nodeClaim.Spec.Chosen.RamGb,
-		PriceEurPerHour: nodeClaim.Spec.Chosen.PriceEurPerHour,
-	}
+	// Update NodeClaim status with instance ID and the recommendation used for provisioning.
+	// Use statusUpdateWithRetry to avoid duplicate provisioning: if Status().Update fails (e.g. 409 Conflict),
+	// the next reconcile would see Pending with empty InstanceID and call CreateInstance again, creating
+	// a second server with the same name.
 	fromPhase := nodeClaim.Status.Phase
-	nodeClaim.Status.Phase = cloudburstv1alpha1.NodeClaimPhaseProvisioning
 	metrics.NodeClaimPhaseTransitionsTotal.WithLabelValues(provider, string(fromPhase), string(cloudburstv1alpha1.NodeClaimPhaseProvisioning)).Inc()
-	nodeClaim.Status.Timestamps.CreatedAt = metav1.Now()
-	nodeClaim.Status.Timestamps.LastTransition = metav1.Now()
-
-	if err := r.Status().Update(ctx, nodeClaim); err != nil {
-		logger.Error(err, "unable to update NodeClaim status")
+	apply := func(nc *cloudburstv1alpha1.NodeClaim) {
+		nc.Status.InstanceID = instanceID
+		nc.Status.RecommendationUsed = &cloudburstv1alpha1.InstanceDetails{
+			Provider:        nodeClaim.Spec.Chosen.Provider,
+			Region:          nodeClaim.Spec.Chosen.Region,
+			InstanceType:    nodeClaim.Spec.Chosen.InstanceType,
+			VCPU:            nodeClaim.Spec.Chosen.VCPU,
+			RamGb:           nodeClaim.Spec.Chosen.RamGb,
+			PriceEurPerHour: nodeClaim.Spec.Chosen.PriceEurPerHour,
+		}
+		nc.Status.Phase = cloudburstv1alpha1.NodeClaimPhaseProvisioning
+		nc.Status.Timestamps.CreatedAt = metav1.Now()
+		nc.Status.Timestamps.LastTransition = metav1.Now()
+	}
+	if err := r.statusUpdateWithRetry(ctx, nodeClaim, apply, logger); err != nil {
+		logger.Error(err, "unable to update NodeClaim status after instance creation")
 		return ctrl.Result{}, err
 	}
 
@@ -514,6 +546,78 @@ func getProvisioningParams(provider string, nodeClass *cloudburstv1alpha1.NodeCl
 			arubaLocation = "itbg-bergamo"
 		}
 		return arubaLocation, nodeClass.Spec.Aruba.Image, nil
+	case "upcloud":
+		if nodeClass.Spec.UpCloud == nil {
+			return "", "", fmt.Errorf("NodeClass spec.upcloud is required")
+		}
+		upcloudZone := chosenRegion
+		if nodeClass.Spec.UpCloud.Zone != "" {
+			upcloudZone = nodeClass.Spec.UpCloud.Zone
+		}
+		return upcloudZone, nodeClass.Spec.UpCloud.Image, nil
+	case "exoscale":
+		if nodeClass.Spec.Exoscale == nil {
+			return "", "", fmt.Errorf("NodeClass spec.exoscale is required")
+		}
+		exoscaleZone := chosenRegion
+		if nodeClass.Spec.Exoscale.Zone != "" {
+			exoscaleZone = nodeClass.Spec.Exoscale.Zone
+		}
+		return exoscaleZone, nodeClass.Spec.Exoscale.Image, nil
+	case "seeweb":
+		if nodeClass.Spec.Seeweb == nil {
+			return "", "", fmt.Errorf("NodeClass spec.seeweb is required")
+		}
+		seewebDatacenter := chosenRegion
+		if nodeClass.Spec.Seeweb.Datacenter != "" {
+			seewebDatacenter = nodeClass.Spec.Seeweb.Datacenter
+		}
+		return seewebDatacenter, nodeClass.Spec.Seeweb.Image, nil
+	case "contabo":
+		if nodeClass.Spec.Contabo == nil {
+			return "", "", fmt.Errorf("NodeClass spec.contabo is required")
+		}
+		contaboRegion := chosenRegion
+		if nodeClass.Spec.Contabo.Region != "" {
+			contaboRegion = nodeClass.Spec.Contabo.Region
+		}
+		return contaboRegion, nodeClass.Spec.Contabo.Image, nil
+	case "gcore":
+		if nodeClass.Spec.Gcore == nil {
+			return "", "", fmt.Errorf("NodeClass spec.gcore is required")
+		}
+		gcoreRegion := chosenRegion
+		if nodeClass.Spec.Gcore.Region != "" {
+			gcoreRegion = nodeClass.Spec.Gcore.Region
+		}
+		return gcoreRegion, nodeClass.Spec.Gcore.Image, nil
+	case "cherry_servers":
+		if nodeClass.Spec.CherryServers == nil {
+			return "", "", fmt.Errorf("NodeClass spec.cherryServers is required")
+		}
+		cherryRegion := chosenRegion
+		if nodeClass.Spec.CherryServers.Region != "" {
+			cherryRegion = nodeClass.Spec.CherryServers.Region
+		}
+		return cherryRegion, nodeClass.Spec.CherryServers.Image, nil
+	case "clouding":
+		if nodeClass.Spec.Clouding == nil {
+			return "", "", fmt.Errorf("NodeClass spec.clouding is required")
+		}
+		cloudingRegion := chosenRegion
+		if nodeClass.Spec.Clouding.Region != "" {
+			cloudingRegion = nodeClass.Spec.Clouding.Region
+		}
+		return cloudingRegion, nodeClass.Spec.Clouding.Image, nil
+	case "ibm_cloud":
+		if nodeClass.Spec.IBMCloud == nil {
+			return "", "", fmt.Errorf("NodeClass spec.ibmCloud is required")
+		}
+		ibmRegion := chosenRegion
+		if nodeClass.Spec.IBMCloud.Region != "" {
+			ibmRegion = nodeClass.Spec.IBMCloud.Region
+		}
+		return ibmRegion, nodeClass.Spec.IBMCloud.Image, nil
 	default:
 		return "", "", fmt.Errorf("unsupported provider: %s", provider)
 	}
@@ -746,13 +850,33 @@ func (r *NodeClaimReconciler) handleJoining(ctx context.Context, nodeClaim *clou
 				}
 			}
 
+			// Apply user-defined taints from NodePool template.
+			for _, t := range nodePool.Spec.Template.Taints {
+				matchingNode.Spec.Taints = append(matchingNode.Spec.Taints, corev1.Taint{
+					Key:    t.Key,
+					Value:  t.Value,
+					Effect: corev1.TaintEffect(t.Effect),
+				})
+			}
+
+			// Remove the startup taint so the scheduler can place workloads on this node.
+			filtered := make([]corev1.Taint, 0, len(matchingNode.Spec.Taints))
+			for _, t := range matchingNode.Spec.Taints {
+				if t.Key == "cloudburst.io/not-ready" {
+					continue
+				}
+				filtered = append(filtered, t)
+			}
+			matchingNode.Spec.Taints = filtered
+
 			if err := r.Patch(ctx, matchingNode, client.MergeFrom(original)); err != nil {
-				logger.Error(err, "failed to apply NodePool template labels to node", "nodeName", matchingNode.Name)
+				logger.Error(err, "failed to apply NodePool template labels/taints to node", "nodeName", matchingNode.Name)
 			} else {
-				logger.Info("applied NodePool template labels to node",
+				logger.Info("applied NodePool template labels/taints to node",
 					"nodeName", matchingNode.Name,
 					"nodePool", nodeClaim.Spec.NodePoolRef,
 					"labels", matchingNode.Labels,
+					"taintCount", len(matchingNode.Spec.Taints),
 				)
 			}
 		}
@@ -1059,16 +1183,28 @@ func providerIDMatchesInstance(providerID, instanceID string) bool {
 	return false
 }
 
-// statusUpdateWithRetry performs Status().Update with retry on conflict (up to 3 attempts).
-// Used to avoid 409 when NodePool and NodeClaim controllers reconcile concurrently.
+// statusUpdateWithRetry performs Status().Update with retry on conflict (up to 6 attempts with backoff).
+// Used to avoid 409 when NodePool and NodeClaim controllers reconcile concurrently, or when
+// multiple controller replicas run without leader election.
 // apply is called before each Update to set the desired status fields.
 func (r *NodeClaimReconciler) statusUpdateWithRetry(ctx context.Context, nodeClaim *cloudburstv1alpha1.NodeClaim, apply func(*cloudburstv1alpha1.NodeClaim), logger logr.Logger) error {
-	for attempt := 0; attempt < 3; attempt++ {
+	const maxAttempts = 6
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		apply(nodeClaim)
 		if err := r.Status().Update(ctx, nodeClaim); err != nil {
-			if k8serrors.IsConflict(err) && attempt < 2 {
+			if k8serrors.IsConflict(err) && attempt < maxAttempts-1 {
 				if err := r.Get(ctx, client.ObjectKeyFromObject(nodeClaim), nodeClaim); err != nil {
 					return err
+				}
+				backoff := time.Duration(50*(1<<attempt)) * time.Millisecond
+				if backoff > 2*time.Second {
+					backoff = 2 * time.Second
+				}
+				logger.Info("status update conflict, retrying with backoff", "attempt", attempt+1, "backoff", backoff)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(backoff):
 				}
 				continue
 			}
@@ -1076,17 +1212,19 @@ func (r *NodeClaimReconciler) statusUpdateWithRetry(ctx context.Context, nodeCla
 		}
 		return nil
 	}
-	return nil
+	return nil // unreachable; loop always returns
 }
 
-// updateStatus updates NodeClaim status with error
-func (r *NodeClaimReconciler) updateStatus(ctx context.Context, nodeClaim *cloudburstv1alpha1.NodeClaim, phase cloudburstv1alpha1.NodeClaimPhase, errorMsg string) {
-	nodeClaim.Status.Phase = phase
-	nodeClaim.Status.LastError = errorMsg
-	nodeClaim.Status.Timestamps.LastTransition = metav1.Now()
-	if err := r.Status().Update(ctx, nodeClaim); err != nil {
-		log.FromContext(ctx).Error(err, "failed to update NodeClaim status", "phase", phase)
+// updateStatus updates NodeClaim status with error, using statusUpdateWithRetry
+// to handle conflicts. Returns error so callers can requeue on failure.
+func (r *NodeClaimReconciler) updateStatus(ctx context.Context, nodeClaim *cloudburstv1alpha1.NodeClaim, phase cloudburstv1alpha1.NodeClaimPhase, errorMsg string) error {
+	logger := log.FromContext(ctx)
+	apply := func(nc *cloudburstv1alpha1.NodeClaim) {
+		nc.Status.Phase = phase
+		nc.Status.LastError = errorMsg
+		nc.Status.Timestamps.LastTransition = metav1.Now()
 	}
+	return r.statusUpdateWithRetry(ctx, nodeClaim, apply, logger)
 }
 
 // recommendationRequestFromSummary converts NodeClaim RecommendationRequestSummary to CloudBroker request.

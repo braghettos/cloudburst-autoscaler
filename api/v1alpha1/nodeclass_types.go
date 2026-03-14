@@ -55,6 +55,38 @@ type NodeClassSpec struct {
 	// +optional
 	Aruba *ArubaConfig `json:"aruba,omitempty"`
 
+	// UpCloud configuration (used when NodeClaim Chosen.Provider is upcloud)
+	// +optional
+	UpCloud *UpCloudConfig `json:"upcloud,omitempty"`
+
+	// Exoscale configuration (used when NodeClaim Chosen.Provider is exoscale)
+	// +optional
+	Exoscale *ExoscaleConfig `json:"exoscale,omitempty"`
+
+	// Seeweb configuration (used when NodeClaim Chosen.Provider is seeweb)
+	// +optional
+	Seeweb *SeewebConfig `json:"seeweb,omitempty"`
+
+	// Contabo configuration (used when NodeClaim Chosen.Provider is contabo)
+	// +optional
+	Contabo *ContaboConfig `json:"contabo,omitempty"`
+
+	// Gcore configuration (used when NodeClaim Chosen.Provider is gcore)
+	// +optional
+	Gcore *GcoreConfig `json:"gcore,omitempty"`
+
+	// CherryServers configuration (used when NodeClaim Chosen.Provider is cherry_servers)
+	// +optional
+	CherryServers *CherryServersConfig `json:"cherryServers,omitempty"`
+
+	// Clouding configuration (used when NodeClaim Chosen.Provider is clouding)
+	// +optional
+	Clouding *CloudingConfig `json:"clouding,omitempty"`
+
+	// IBMCloud configuration (used when NodeClaim Chosen.Provider is ibm_cloud)
+	// +optional
+	IBMCloud *IBMCloudConfig `json:"ibmCloud,omitempty"`
+
 	// Join configuration for joining the Kubernetes cluster
 	Join JoinConfig `json:"join"`
 
@@ -231,6 +263,172 @@ type ArubaConfig struct {
 	ApplicationSecretSecretRef *corev1.SecretKeySelector `json:"applicationSecretSecretRef,omitempty"`
 }
 
+// UpCloudConfig defines UpCloud-specific configuration
+type UpCloudConfig struct {
+	// Zone is the UpCloud zone (optional when region comes from CloudBroker recommendation; used as fallback)
+	// +optional
+	Zone string `json:"zone,omitempty"`
+
+	// APITokenSecretRef references a secret containing the UpCloud API token.
+	// Secret must have key "UPCLOUD_API_TOKEN" or "UPCLOUD_TOKEN".
+	// Create at hub.upcloud.com/account/api-tokens.
+	// +optional
+	APITokenSecretRef *corev1.SecretKeySelector `json:"apiTokenSecretRef,omitempty"`
+
+	// Image is the UpCloud storage template UUID for Ubuntu (default: Ubuntu 22.04 template).
+	// +optional
+	Image string `json:"image,omitempty"`
+}
+
+// ExoscaleConfig defines Exoscale-specific configuration
+type ExoscaleConfig struct {
+	// Zone is the Exoscale zone (optional when region comes from CloudBroker recommendation; used as fallback)
+	// +optional
+	Zone string `json:"zone,omitempty"`
+
+	// APIKeySecretRef references a secret containing the Exoscale API key.
+	// Secret must have key "EXOSCALE_API_KEY".
+	// +optional
+	APIKeySecretRef *corev1.SecretKeySelector `json:"apiKeySecretRef,omitempty"`
+
+	// APISecretSecretRef references a secret containing the Exoscale API secret.
+	// Secret must have key "EXOSCALE_API_SECRET".
+	// +optional
+	APISecretSecretRef *corev1.SecretKeySelector `json:"apiSecretSecretRef,omitempty"`
+
+	// Image is the Exoscale template name or ID (default: Linux Ubuntu 22.04 LTS 64-bit).
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// DiskSizeGB is the disk size in GiB (default: 10).
+	// +optional
+	DiskSizeGB int64 `json:"diskSizeGB,omitempty"`
+}
+
+// SeewebConfig defines Seeweb ECS-specific configuration.
+type SeewebConfig struct {
+	// Datacenter is the default Seeweb datacenter slug (e.g. "it-mi2", "it-fr2", "ch-lug1", "bg-sof1").
+	// +optional
+	Datacenter string `json:"datacenter,omitempty"`
+
+	// Image is the Seeweb image name (default: "Ubuntu 22.04 LTS").
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// APITokenSecretRef references a secret containing the Seeweb API token (X-APITOKEN header).
+	// Secret must have key "SEEWEB_API_TOKEN" or the specified key.
+	// +optional
+	APITokenSecretRef *corev1.SecretKeySelector `json:"apiTokenSecretRef,omitempty"`
+}
+
+// ContaboConfig defines Contabo Cloud VPS/VDS configuration.
+type ContaboConfig struct {
+	// Region is the Contabo region (e.g. "eu-de-1", "eu-de-2").
+	// +optional
+	Region string `json:"region,omitempty"`
+
+	// Image is the Contabo image ID (default: Ubuntu 22.04).
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// ClientIDSecretRef references a secret containing the Contabo OAuth2 client ID.
+	// +optional
+	ClientIDSecretRef *corev1.SecretKeySelector `json:"clientIDSecretRef,omitempty"`
+
+	// ClientSecretSecretRef references a secret containing the Contabo OAuth2 client secret.
+	// +optional
+	ClientSecretSecretRef *corev1.SecretKeySelector `json:"clientSecretSecretRef,omitempty"`
+
+	// APIUserSecretRef references a secret containing the Contabo API user.
+	// +optional
+	APIUserSecretRef *corev1.SecretKeySelector `json:"apiUserSecretRef,omitempty"`
+
+	// APIPasswordSecretRef references a secret containing the Contabo API password.
+	// +optional
+	APIPasswordSecretRef *corev1.SecretKeySelector `json:"apiPasswordSecretRef,omitempty"`
+}
+
+// GcoreConfig defines Gcore Cloud configuration.
+type GcoreConfig struct {
+	// ProjectID is the Gcore project ID (required).
+	ProjectID int64 `json:"projectID"`
+
+	// Region is the Gcore region (e.g. "lux-1", "fra-1").
+	// +optional
+	Region string `json:"region,omitempty"`
+
+	// Image is the Gcore image ID or name (default: Ubuntu 22.04).
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// APIKeySecretRef references a secret containing the Gcore API key.
+	// +optional
+	APIKeySecretRef *corev1.SecretKeySelector `json:"apiKeySecretRef,omitempty"`
+}
+
+// CherryServersConfig defines Cherry Servers configuration.
+type CherryServersConfig struct {
+	// ProjectID is the Cherry Servers project ID (required).
+	ProjectID int64 `json:"projectID"`
+
+	// Region is the Cherry Servers region (e.g. "eu-lt-1", "eu-nl-1").
+	// +optional
+	Region string `json:"region,omitempty"`
+
+	// Image is the Cherry Servers image slug (default: Ubuntu 22.04).
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// APITokenSecretRef references a secret containing the Cherry Servers API token.
+	// +optional
+	APITokenSecretRef *corev1.SecretKeySelector `json:"apiTokenSecretRef,omitempty"`
+}
+
+// CloudingConfig defines Clouding.io configuration.
+type CloudingConfig struct {
+	// Region is the Clouding region (e.g. "es-bcn-1"). Single region (Barcelona).
+	// +optional
+	Region string `json:"region,omitempty"`
+
+	// Image is the Clouding image (default: Ubuntu 22.04).
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// FirewallID is the default firewall ID for new servers (optional; provisioner fetches one if empty).
+	// +optional
+	FirewallID string `json:"firewallId,omitempty"`
+
+	// APIKeySecretRef references a secret containing the Clouding.io API key.
+	// +optional
+	APIKeySecretRef *corev1.SecretKeySelector `json:"apiKeySecretRef,omitempty"`
+}
+
+// IBMCloudConfig defines IBM Cloud VPC configuration.
+type IBMCloudConfig struct {
+	// ResourceGroup is the IBM Cloud resource group name or ID.
+	ResourceGroup string `json:"resourceGroup"`
+
+	// SubnetID is the VPC subnet ID for instances. Optional; when empty, VPC and subnet are auto-created (same approach as Azure).
+	// +optional
+	SubnetID string `json:"subnetID,omitempty"`
+
+	// Region is the IBM Cloud region (e.g. "eu-de", "us-south").
+	// +optional
+	Region string `json:"region,omitempty"`
+
+	// SecurityGroups are VPC security group IDs (optional).
+	// +optional
+	SecurityGroups []string `json:"securityGroups,omitempty"`
+
+	// Image is the image ID or name (default: Ubuntu 22.04).
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// APIKeySecretRef references a secret containing the IBM Cloud API key.
+	// +optional
+	APIKeySecretRef *corev1.SecretKeySelector `json:"apiKeySecretRef,omitempty"`
+}
+
 // AzureConfig defines Azure VM-specific configuration
 type AzureConfig struct {
 	// SubscriptionID is the Azure subscription ID
@@ -243,8 +441,10 @@ type AzureConfig struct {
 	// +optional
 	Location string `json:"location,omitempty"`
 
-	// SubnetID is the full resource ID of the subnet for the VM NIC (e.g. /subscriptions/.../resourceGroups/.../providers/Microsoft.Network/virtualNetworks/.../subnets/...)
-	SubnetID string `json:"subnetID"`
+	// SubnetID is the full resource ID of the subnet for the VM NIC (e.g. /subscriptions/.../resourceGroups/.../providers/Microsoft.Network/virtualNetworks/.../subnets/...).
+	// When empty, the provisioner auto-creates a VNet and subnet (cloudburst-vnet/default) in the resource group.
+	// +optional
+	SubnetID string `json:"subnetID,omitempty"`
 
 	// ImageReference is optional; format "Publisher:Offer:Sku:Version" (e.g. Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest). Defaults to Ubuntu 22.04.
 	// +optional
@@ -311,6 +511,9 @@ type BootstrapConfig struct {
 
 // NodeClassStatus defines the observed state of NodeClass
 type NodeClassStatus struct {
+	// Conditions represent the latest available observations of the NodeClass's state.
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 //+kubebuilder:object:root=true

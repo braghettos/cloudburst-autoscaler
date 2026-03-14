@@ -25,11 +25,19 @@ import (
 	"github.com/diegobraga/cloudburst-autoscaler/internal/aruba"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/aws"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/azure"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/cherry_servers"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/clouding"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/contabo"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/digitalocean"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/exoscale"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/gcore"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/gcp"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/hetzner"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/ibmcloud"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/ovh"
 	"github.com/diegobraga/cloudburst-autoscaler/internal/scaleway"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/seeweb"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/upcloud"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -63,6 +71,22 @@ func NewFromNodeClass(ctx context.Context, provider string, nodeClass *cloudburs
 		return newAzure(ctx, nodeClass, namespace, c, region)
 	case "aruba":
 		return newAruba(ctx, nodeClass, namespace, c, region)
+	case "upcloud":
+		return newUpCloud(ctx, nodeClass, namespace, c, region)
+	case "exoscale":
+		return newExoscale(ctx, nodeClass, namespace, c, region)
+	case "seeweb":
+		return newSeeweb(ctx, nodeClass, namespace, c, region)
+	case "contabo":
+		return newContabo(ctx, nodeClass, namespace, c, region)
+	case "gcore":
+		return newGcore(ctx, nodeClass, namespace, c, region)
+	case "cherry_servers":
+		return newCherryServers(ctx, nodeClass, namespace, c, region)
+	case "clouding":
+		return newClouding(ctx, nodeClass, namespace, c, region)
+	case "ibm_cloud":
+		return newIBMCloud(ctx, nodeClass, namespace, c, region)
 	default:
 		return nil, fmt.Errorf("unsupported provider: %s", provider)
 	}
@@ -279,9 +303,10 @@ func newAzure(ctx context.Context, nodeClass *cloudburstv1alpha1.NodeClass, name
 	subID := nodeClass.Spec.Azure.SubscriptionID
 	rg := nodeClass.Spec.Azure.ResourceGroup
 	subnetID := nodeClass.Spec.Azure.SubnetID
-	if subID == "" || rg == "" || location == "" || subnetID == "" {
-		return nil, fmt.Errorf("NodeClass spec.azure subscriptionID, resourceGroup, location (from recommendation), and subnetID are required")
+	if subID == "" || rg == "" || location == "" {
+		return nil, fmt.Errorf("NodeClass spec.azure subscriptionID, resourceGroup, and location (from recommendation) are required")
 	}
+	// subnetID may be empty; when empty, the provisioner auto-creates VNet and subnet
 	var tenantID, clientID, clientSecret string
 	if nodeClass.Spec.Azure.TenantIDSecretRef != nil {
 		secret := &corev1.Secret{}
@@ -371,4 +396,280 @@ func newAruba(ctx context.Context, nodeClass *cloudburstv1alpha1.NodeClass, name
 		return nil, fmt.Errorf("Aruba credentials required: set spec.aruba secret refs or ARUBA_API_KEY, ARUBA_API_SECRET env vars")
 	}
 	return aruba.NewProvisioner(ctx, "https://api.arubacloud.com", appKey, appSecret, "", nodeClass.Spec.Aruba.ProjectID)
+}
+
+func newUpCloud(ctx context.Context, nodeClass *cloudburstv1alpha1.NodeClass, namespace string, c Getter, zone string) (Provisioner, error) {
+	if nodeClass.Spec.UpCloud == nil {
+		return nil, fmt.Errorf("NodeClass spec.upcloud is required for UpCloud provider")
+	}
+	var apiToken string
+	if nodeClass.Spec.UpCloud.APITokenSecretRef != nil {
+		secret := &corev1.Secret{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: nodeClass.Spec.UpCloud.APITokenSecretRef.Name}, secret); err != nil {
+			return nil, fmt.Errorf("failed to get UpCloud API token secret: %w", err)
+		}
+		k := nodeClass.Spec.UpCloud.APITokenSecretRef.Key
+		if k == "" {
+			k = "UPCLOUD_API_TOKEN"
+		}
+		apiToken = string(secret.Data[k])
+		if apiToken == "" {
+			apiToken = string(secret.Data["UPCLOUD_TOKEN"])
+		}
+	}
+	if apiToken == "" {
+		apiToken = os.Getenv("UPCLOUD_API_TOKEN")
+	}
+	if apiToken == "" {
+		apiToken = os.Getenv("UPCLOUD_TOKEN")
+	}
+	if apiToken == "" {
+		return nil, fmt.Errorf("no UpCloud API token: set spec.upcloud.apiTokenSecretRef or UPCLOUD_API_TOKEN env var")
+	}
+	return upcloud.NewProvisioner(ctx, apiToken, zone)
+}
+
+func newExoscale(ctx context.Context, nodeClass *cloudburstv1alpha1.NodeClass, namespace string, c Getter, zone string) (Provisioner, error) {
+	if nodeClass.Spec.Exoscale == nil {
+		return nil, fmt.Errorf("NodeClass spec.exoscale is required for Exoscale provider")
+	}
+	var apiKey, apiSecret string
+	if nodeClass.Spec.Exoscale.APIKeySecretRef != nil {
+		secret := &corev1.Secret{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: nodeClass.Spec.Exoscale.APIKeySecretRef.Name}, secret); err != nil {
+			return nil, fmt.Errorf("failed to get Exoscale API key secret: %w", err)
+		}
+		k := nodeClass.Spec.Exoscale.APIKeySecretRef.Key
+		if k == "" {
+			k = "EXOSCALE_API_KEY"
+		}
+		apiKey = string(secret.Data[k])
+	}
+	if nodeClass.Spec.Exoscale.APISecretSecretRef != nil {
+		secret := &corev1.Secret{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: nodeClass.Spec.Exoscale.APISecretSecretRef.Name}, secret); err != nil {
+			return nil, fmt.Errorf("failed to get Exoscale API secret: %w", err)
+		}
+		k := nodeClass.Spec.Exoscale.APISecretSecretRef.Key
+		if k == "" {
+			k = "EXOSCALE_API_SECRET"
+		}
+		apiSecret = string(secret.Data[k])
+	}
+	if apiKey == "" {
+		apiKey = os.Getenv("EXOSCALE_API_KEY")
+	}
+	if apiSecret == "" {
+		apiSecret = os.Getenv("EXOSCALE_API_SECRET")
+	}
+	if apiKey == "" || apiSecret == "" {
+		return nil, fmt.Errorf("Exoscale credentials required: set spec.exoscale.apiKeySecretRef and apiSecretSecretRef or EXOSCALE_API_KEY, EXOSCALE_API_SECRET env vars")
+	}
+	exoscaleZone := zone
+	if nodeClass.Spec.Exoscale.Zone != "" {
+		exoscaleZone = nodeClass.Spec.Exoscale.Zone
+	}
+	return exoscale.NewProvisioner(ctx, apiKey, apiSecret, exoscaleZone, nodeClass.Spec.Exoscale.DiskSizeGB)
+}
+
+func newSeeweb(ctx context.Context, nodeClass *cloudburstv1alpha1.NodeClass, namespace string, c Getter, region string) (Provisioner, error) {
+	if nodeClass.Spec.Seeweb == nil {
+		return nil, fmt.Errorf("NodeClass spec.seeweb is required for Seeweb provider")
+	}
+	cfg := nodeClass.Spec.Seeweb
+	var apiToken string
+	if cfg.APITokenSecretRef != nil {
+		secret := &corev1.Secret{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: cfg.APITokenSecretRef.Name}, secret); err != nil {
+			return nil, fmt.Errorf("failed to get Seeweb API token secret: %w", err)
+		}
+		k := cfg.APITokenSecretRef.Key
+		if k == "" {
+			k = "SEEWEB_API_TOKEN"
+		}
+		apiToken = string(secret.Data[k])
+	}
+	if apiToken == "" {
+		apiToken = os.Getenv("SEEWEB_API_TOKEN")
+	}
+	if apiToken == "" {
+		return nil, fmt.Errorf("Seeweb API token required: set spec.seeweb.apiTokenSecretRef or SEEWEB_API_TOKEN env var")
+	}
+	datacenter := cfg.Datacenter
+	if datacenter == "" {
+		datacenter = region
+	}
+	return seeweb.NewProvisioner(ctx, apiToken, datacenter)
+}
+
+func newContabo(ctx context.Context, nodeClass *cloudburstv1alpha1.NodeClass, namespace string, c Getter, region string) (Provisioner, error) {
+	if nodeClass.Spec.Contabo == nil {
+		return nil, fmt.Errorf("NodeClass spec.contabo is required for Contabo provider")
+	}
+	cfg := nodeClass.Spec.Contabo
+	var clientID, clientSecret, apiUser, apiPassword string
+	if cfg.ClientIDSecretRef != nil {
+		secret := &corev1.Secret{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: cfg.ClientIDSecretRef.Name}, secret); err != nil {
+			return nil, fmt.Errorf("failed to get Contabo client ID secret: %w", err)
+		}
+		clientID = string(secret.Data[cfg.ClientIDSecretRef.Key])
+		if clientID == "" {
+			clientID = string(secret.Data["CONTABO_CLIENT_ID"])
+		}
+	}
+	if cfg.ClientSecretSecretRef != nil {
+		secret := &corev1.Secret{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: cfg.ClientSecretSecretRef.Name}, secret); err != nil {
+			return nil, fmt.Errorf("failed to get Contabo client secret: %w", err)
+		}
+		clientSecret = string(secret.Data[cfg.ClientSecretSecretRef.Key])
+		if clientSecret == "" {
+			clientSecret = string(secret.Data["CONTABO_CLIENT_SECRET"])
+		}
+	}
+	if cfg.APIUserSecretRef != nil {
+		secret := &corev1.Secret{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: cfg.APIUserSecretRef.Name}, secret); err != nil {
+			return nil, fmt.Errorf("failed to get Contabo API user secret: %w", err)
+		}
+		apiUser = string(secret.Data[cfg.APIUserSecretRef.Key])
+		if apiUser == "" {
+			apiUser = string(secret.Data["CONTABO_API_USER"])
+		}
+	}
+	if cfg.APIPasswordSecretRef != nil {
+		secret := &corev1.Secret{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: cfg.APIPasswordSecretRef.Name}, secret); err != nil {
+			return nil, fmt.Errorf("failed to get Contabo API password secret: %w", err)
+		}
+		apiPassword = string(secret.Data[cfg.APIPasswordSecretRef.Key])
+		if apiPassword == "" {
+			apiPassword = string(secret.Data["CONTABO_API_PASSWORD"])
+		}
+	}
+	if clientID == "" {
+		clientID = os.Getenv("CONTABO_CLIENT_ID")
+	}
+	if clientSecret == "" {
+		clientSecret = os.Getenv("CONTABO_CLIENT_SECRET")
+	}
+	if apiUser == "" {
+		apiUser = os.Getenv("CONTABO_API_USER")
+	}
+	if apiPassword == "" {
+		apiPassword = os.Getenv("CONTABO_API_PASSWORD")
+	}
+	if clientID == "" || clientSecret == "" || apiUser == "" || apiPassword == "" {
+		return nil, fmt.Errorf("Contabo credentials required: set spec.contabo secret refs or CONTABO_* env vars")
+	}
+	return contabo.NewProvisioner(ctx, clientID, clientSecret, apiUser, apiPassword)
+}
+
+func newGcore(ctx context.Context, nodeClass *cloudburstv1alpha1.NodeClass, namespace string, c Getter, region string) (Provisioner, error) {
+	if nodeClass.Spec.Gcore == nil || nodeClass.Spec.Gcore.ProjectID <= 0 {
+		return nil, fmt.Errorf("NodeClass spec.gcore with projectID is required for Gcore provider")
+	}
+	cfg := nodeClass.Spec.Gcore
+	var apiKey string
+	if cfg.APIKeySecretRef != nil {
+		secret := &corev1.Secret{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: cfg.APIKeySecretRef.Name}, secret); err != nil {
+			return nil, fmt.Errorf("failed to get Gcore API key secret: %w", err)
+		}
+		k := cfg.APIKeySecretRef.Key
+		if k == "" {
+			k = "GCORE_API_KEY"
+		}
+		apiKey = string(secret.Data[k])
+	}
+	if apiKey == "" {
+		apiKey = os.Getenv("GCORE_API_KEY")
+	}
+	if apiKey == "" {
+		return nil, fmt.Errorf("Gcore API key required: set spec.gcore.apiKeySecretRef or GCORE_API_KEY env var")
+	}
+	return gcore.NewProvisioner(ctx, apiKey, int(cfg.ProjectID))
+}
+
+func newCherryServers(ctx context.Context, nodeClass *cloudburstv1alpha1.NodeClass, namespace string, c Getter, region string) (Provisioner, error) {
+	if nodeClass.Spec.CherryServers == nil || nodeClass.Spec.CherryServers.ProjectID <= 0 {
+		return nil, fmt.Errorf("NodeClass spec.cherryServers with projectID is required for Cherry Servers provider")
+	}
+	cfg := nodeClass.Spec.CherryServers
+	var apiToken string
+	if cfg.APITokenSecretRef != nil {
+		secret := &corev1.Secret{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: cfg.APITokenSecretRef.Name}, secret); err != nil {
+			return nil, fmt.Errorf("failed to get Cherry Servers API token secret: %w", err)
+		}
+		k := cfg.APITokenSecretRef.Key
+		if k == "" {
+			k = "CHERRY_SERVERS_API_TOKEN"
+		}
+		apiToken = string(secret.Data[k])
+	}
+	if apiToken == "" {
+		apiToken = os.Getenv("CHERRY_SERVERS_API_TOKEN")
+	}
+	if apiToken == "" {
+		return nil, fmt.Errorf("Cherry Servers API token required: set spec.cherryServers.apiTokenSecretRef or CHERRY_SERVERS_API_TOKEN env var")
+	}
+	return cherry_servers.NewProvisioner(ctx, apiToken, int(cfg.ProjectID))
+}
+
+func newClouding(ctx context.Context, nodeClass *cloudburstv1alpha1.NodeClass, namespace string, c Getter, region string) (Provisioner, error) {
+	if nodeClass.Spec.Clouding == nil {
+		return nil, fmt.Errorf("NodeClass spec.clouding is required for Clouding.io provider")
+	}
+	cfg := nodeClass.Spec.Clouding
+	var apiKey string
+	if cfg.APIKeySecretRef != nil {
+		secret := &corev1.Secret{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: cfg.APIKeySecretRef.Name}, secret); err != nil {
+			return nil, fmt.Errorf("failed to get Clouding.io API key secret: %w", err)
+		}
+		k := cfg.APIKeySecretRef.Key
+		if k == "" {
+			k = "CLOUDING_API_KEY"
+		}
+		apiKey = string(secret.Data[k])
+	}
+	if apiKey == "" {
+		apiKey = os.Getenv("CLOUDING_API_KEY")
+	}
+	if apiKey == "" {
+		return nil, fmt.Errorf("Clouding.io API key required: set spec.clouding.apiKeySecretRef or CLOUDING_API_KEY env var")
+	}
+	return clouding.NewProvisioner(ctx, apiKey, cfg.FirewallID)
+}
+
+func newIBMCloud(ctx context.Context, nodeClass *cloudburstv1alpha1.NodeClass, namespace string, c Getter, region string) (Provisioner, error) {
+	if nodeClass.Spec.IBMCloud == nil || nodeClass.Spec.IBMCloud.ResourceGroup == "" {
+		return nil, fmt.Errorf("NodeClass spec.ibmCloud with resourceGroup is required for IBM Cloud provider")
+	}
+	cfg := nodeClass.Spec.IBMCloud
+	var apiKey string
+	if cfg.APIKeySecretRef != nil {
+		secret := &corev1.Secret{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: cfg.APIKeySecretRef.Name}, secret); err != nil {
+			return nil, fmt.Errorf("failed to get IBM Cloud API key secret: %w", err)
+		}
+		k := cfg.APIKeySecretRef.Key
+		if k == "" {
+			k = "IBMCLOUD_API_KEY"
+		}
+		apiKey = string(secret.Data[k])
+	}
+	if apiKey == "" {
+		apiKey = os.Getenv("IBMCLOUD_API_KEY")
+	}
+	if apiKey == "" {
+		return nil, fmt.Errorf("IBM Cloud API key required: set spec.ibmCloud.apiKeySecretRef or IBMCLOUD_API_KEY env var")
+	}
+	loc := cfg.Region
+	if loc == "" {
+		loc = region
+	}
+	return ibmcloud.NewProvisioner(ctx, apiKey, loc, cfg.ResourceGroup, cfg.SubnetID, cfg.SecurityGroups)
 }

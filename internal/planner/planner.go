@@ -28,8 +28,6 @@ type DesiredCapacity struct {
 	CPUMilliTotal int64
 	// MemBytesTotal is the total memory requested in bytes
 	MemBytesTotal int64
-	// PodCount is the number of pods requiring resources
-	PodCount int
 	// Arch is the architecture requirement extracted from pod nodeSelector/nodeAffinity.
 	// Empty string means no architecture requirement (any architecture is acceptable).
 	// If multiple pods have different arch requirements, this will contain the first one found.
@@ -39,9 +37,7 @@ type DesiredCapacity struct {
 // CalculateDesiredCapacity sums CPU and memory requests across eligible pods
 // and extracts architecture requirements from pod nodeSelector/nodeAffinity
 func CalculateDesiredCapacity(pods []corev1.Pod) DesiredCapacity {
-	capacity := DesiredCapacity{
-		PodCount: len(pods),
-	}
+	capacity := DesiredCapacity{}
 
 	for i := range pods {
 		cpuMilli, memBytes := CalculateDesiredCapacityForPod(&pods[i])
@@ -111,56 +107,59 @@ func CalculateDesiredCapacityForPod(pod *corev1.Pod) (cpuMilli int64, memBytes i
 	return cpuMilli, memBytes
 }
 
+// GroupPodsByArch groups pods by their architecture requirement.
+// Pods with no architecture requirement go into the empty-string key.
+func GroupPodsByArch(pods []corev1.Pod) map[string][]corev1.Pod {
+	groups := make(map[string][]corev1.Pod)
+	for i := range pods {
+		arch := ExtractArchFromPod(&pods[i])
+		groups[arch] = append(groups[arch], pods[i])
+	}
+	return groups
+}
+
+func isArchKey(key string) bool {
+	return key == "kubernetes.io/arch" || key == "beta.kubernetes.io/arch"
+}
+
 // ExtractArchFromPod extracts architecture requirement from pod's nodeSelector or nodeAffinity.
 // Returns empty string if no architecture requirement is found.
-// Architecture is extracted from:
-// - nodeSelector: kubernetes.io/arch
-// - nodeAffinity: requiredDuringSchedulingIgnoredDuringExecution with kubernetes.io/arch
-// - nodeAffinity: preferredDuringSchedulingIgnoredDuringExecution with kubernetes.io/arch (first match)
+// Checks both kubernetes.io/arch and beta.kubernetes.io/arch labels.
 func ExtractArchFromPod(pod *corev1.Pod) string {
-	// Check nodeSelector first
 	if pod.Spec.NodeSelector != nil {
 		if arch, ok := pod.Spec.NodeSelector["kubernetes.io/arch"]; ok && arch != "" {
-			return arch // Return raw value, CloudBroker will normalize
+			return arch
+		}
+		if arch, ok := pod.Spec.NodeSelector["beta.kubernetes.io/arch"]; ok && arch != "" {
+			return arch
 		}
 	}
 
-	// Check nodeAffinity
 	if pod.Spec.Affinity != nil && pod.Spec.Affinity.NodeAffinity != nil {
-		// Check requiredDuringSchedulingIgnoredDuringExecution
 		if required := pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution; required != nil {
 			for _, term := range required.NodeSelectorTerms {
 				for _, expr := range term.MatchExpressions {
-					if expr.Key == "kubernetes.io/arch" {
-						if len(expr.Values) > 0 {
-							return expr.Values[0] // Return raw value, CloudBroker will normalize
-						}
+					if isArchKey(expr.Key) && len(expr.Values) > 0 {
+						return expr.Values[0]
 					}
 				}
 				for _, field := range term.MatchFields {
-					if field.Key == "kubernetes.io/arch" {
-						if len(field.Values) > 0 {
-							return field.Values[0] // Return raw value, CloudBroker will normalize
-						}
+					if isArchKey(field.Key) && len(field.Values) > 0 {
+						return field.Values[0]
 					}
 				}
 			}
 		}
 
-		// Check preferredDuringSchedulingIgnoredDuringExecution (use first match)
 		for _, pref := range pod.Spec.Affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution {
 			for _, expr := range pref.Preference.MatchExpressions {
-				if expr.Key == "kubernetes.io/arch" {
-					if len(expr.Values) > 0 {
-						return expr.Values[0] // Return raw value, CloudBroker will normalize
-					}
+				if isArchKey(expr.Key) && len(expr.Values) > 0 {
+					return expr.Values[0]
 				}
 			}
 			for _, field := range pref.Preference.MatchFields {
-				if field.Key == "kubernetes.io/arch" {
-					if len(field.Values) > 0 {
-						return field.Values[0] // Return raw value, CloudBroker will normalize
-					}
+				if isArchKey(field.Key) && len(field.Values) > 0 {
+					return field.Values[0]
 				}
 			}
 		}

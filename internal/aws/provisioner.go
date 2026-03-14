@@ -21,13 +21,14 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	cberrors "github.com/diegobraga/cloudburst-autoscaler/internal/errors"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/provutil"
 )
 
 const (
@@ -35,10 +36,6 @@ const (
 	InstanceIDPrefix = "aws/"
 	// DefaultAMI is a placeholder; callers should set AMI from NodeClass
 	DefaultAMI = ""
-	// MaxRetries is the maximum number of retry attempts
-	MaxRetries = 3
-	// RetryDelay is the initial delay between retries
-	RetryDelay = 2 * time.Second
 )
 
 // Provisioner handles AWS EC2 instance provisioning
@@ -85,31 +82,16 @@ func NewProvisioner(ctx context.Context, region, accessKeyID, secretAccessKey st
 // regionParam is the region (must match provisioner region), imageFromConfig is the AMI ID.
 // Returns instanceID in the form "aws/<region>/<instance-id>".
 func (p *Provisioner) CreateInstance(ctx context.Context, name, instanceType, regionParam, startupScript, imageFromConfig string) (string, error) {
-	var lastErr error
-
-	for attempt := 0; attempt <= MaxRetries; attempt++ {
-		if attempt > 0 {
-			waitTime := RetryDelay * time.Duration(1<<uint(attempt-1))
-			select {
-			case <-ctx.Done():
-				return "", fmt.Errorf("context cancelled: %w", ctx.Err())
-			case <-time.After(waitTime):
-			}
-		}
-
-		instanceID, err := p.createInstanceOnce(ctx, name, instanceType, regionParam, startupScript, imageFromConfig)
-		if err == nil {
-			return instanceID, nil
-		}
-
-		if !isRetryableError(err) {
-			return "", err
-		}
-
-		lastErr = err
+	var instanceID string
+	err := provutil.WithRetry(ctx, provutil.MaxRetries, provutil.RetryDelay, isRetryableError, func() error {
+		var retryErr error
+		instanceID, retryErr = p.createInstanceOnce(ctx, name, instanceType, regionParam, startupScript, imageFromConfig)
+		return retryErr
+	})
+	if err != nil {
+		return "", err
 	}
-
-	return "", fmt.Errorf("failed after %d attempts: %w", MaxRetries+1, lastErr)
+	return instanceID, nil
 }
 
 func (p *Provisioner) createInstanceOnce(ctx context.Context, name, instanceType, regionParam, startupScript, imageFromConfig string) (string, error) {
@@ -202,6 +184,10 @@ func (p *Provisioner) IsInstanceRunning(ctx context.Context, instanceID string) 
 		return false, fmt.Errorf("instance %s not found", id)
 	}
 	state := out.Reservations[0].Instances[0].State.Name
+	switch state {
+	case types.InstanceStateNameTerminated, types.InstanceStateNameShuttingDown:
+		return false, &cberrors.InstanceFailedError{Reason: fmt.Sprintf("instance state: %s", state)}
+	}
 	return state == types.InstanceStateNameRunning, nil
 }
 
@@ -215,29 +201,20 @@ func GenerateInstanceName(nodeClaimName string) string {
 	return nodeClaimName
 }
 
-// parseInstanceID parses "aws/<region>/<instance-id>" into region and instance-id.
 func parseInstanceID(instanceID string) (string, string, error) {
-	if !strings.HasPrefix(instanceID, InstanceIDPrefix) {
-		return "", "", fmt.Errorf("invalid AWS instance ID format: %s", instanceID)
-	}
-	rest := strings.TrimPrefix(instanceID, InstanceIDPrefix)
-	parts := strings.SplitN(rest, "/", 2)
-	if len(parts) != 2 {
-		return "", "", fmt.Errorf("invalid AWS instance ID format: %s", instanceID)
-	}
-	return parts[0], parts[1], nil
+	return provutil.ParseInstanceID(instanceID, InstanceIDPrefix)
 }
 
 func isRetryableError(err error) bool {
+	if provutil.IsRetryableError(err) {
+		return true
+	}
 	if err == nil {
 		return false
 	}
-	errStr := err.Error()
-	// VcpuLimitExceeded is not retryable with the same instance type; the controller
-	// will try alternatives (smaller instance types) from NodeClaim.Spec.Alternatives.
-	retryable := []string{"rate limit", "throttl", "temporary", "timeout", "deadline exceeded", "unavailable", "503", "502", "500", "RequestLimitExceeded"}
-	for _, r := range retryable {
-		if strings.Contains(strings.ToLower(errStr), r) {
+	errStr := strings.ToLower(err.Error())
+	for _, r := range []string{"throttl", "requestlimitexceeded"} {
+		if strings.Contains(errStr, r) {
 			return true
 		}
 	}

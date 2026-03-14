@@ -125,6 +125,10 @@ type NodeClaimStatus struct {
 	// Phase is the current phase of the NodeClaim
 	Phase NodeClaimPhase `json:"phase"`
 
+	// Conditions represent the latest available observations of the NodeClaim's state.
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
 	// InstanceID is the cloud provider instance ID
 	// +optional
 	InstanceID string `json:"instanceID,omitempty"`
@@ -158,6 +162,11 @@ type NodeClaimTimestamps struct {
 
 	// ReadyAt is when the NodeClaim became ready
 	ReadyAt *metav1.Time `json:"readyAt,omitempty"`
+
+	// EmptySince tracks when the node first had no non-DaemonSet pods.
+	// Cleared when a non-DaemonSet pod appears. Used for TTLSecondsAfterEmpty.
+	// +optional
+	EmptySince *metav1.Time `json:"emptySince,omitempty"`
 
 	// LastTransition is when the phase last changed
 	LastTransition metav1.Time `json:"lastTransition,omitempty"`

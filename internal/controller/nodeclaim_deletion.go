@@ -110,6 +110,11 @@ func (r *NodeClaimReconciler) handleDeleting(ctx context.Context, nodeClaim *clo
 					}
 				} else {
 					defer prov.Close()
+					if stopper, ok := prov.(provisioner.Stopper); ok {
+						if err := stopper.StopInstance(ctx, nodeClaim.Status.InstanceID); err != nil {
+							logger.Error(err, "failed to stop instance before delete", "instanceID", nodeClaim.Status.InstanceID)
+						}
+					}
 					if err := prov.DeleteInstance(ctx, nodeClaim.Status.InstanceID); err != nil {
 						metrics.ProviderErrorsTotal.WithLabelValues(provider, "delete").Inc()
 						logger.Error(err, "failed to delete instance", "instanceID", nodeClaim.Status.InstanceID)

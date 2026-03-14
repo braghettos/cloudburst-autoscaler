@@ -138,7 +138,7 @@ func GenerateStartupScript(config *StartupScriptConfig) string {
 	script.WriteString("mkdir -p /etc/systemd/system/kubelet.service.d\n")
 	script.WriteString("cat > /etc/systemd/system/kubelet.service.d/10-node-ip.conf <<EOF\n")
 	script.WriteString("[Service]\n")
-	script.WriteString("Environment=\"KUBELET_EXTRA_ARGS=--node-ip=$TAILSCALE_IP --cgroup-driver=systemd\"\n")
+	script.WriteString("Environment=\"KUBELET_EXTRA_ARGS=--node-ip=$TAILSCALE_IP --cgroup-driver=systemd --register-with-taints=cloudburst.io/not-ready=true:NoSchedule\"\n")
 	script.WriteString("EOF\n")
 	script.WriteString("systemctl daemon-reload\n\n")
 

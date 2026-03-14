@@ -21,7 +21,9 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -29,6 +31,8 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v5"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v4"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
+	cberrors "github.com/diegobraga/cloudburst-autoscaler/internal/errors"
+	"github.com/diegobraga/cloudburst-autoscaler/internal/provutil"
 )
 
 const (
@@ -36,14 +40,14 @@ const (
 	InstanceIDPrefix = "azure/"
 	// NICNameSuffix is appended to VM name for the NIC resource name
 	NICNameSuffix = "-nic"
-	// MaxRetries is the maximum number of retry attempts
-	MaxRetries = 3
-	// RetryDelay is the initial delay between retries
-	RetryDelay = 2 * time.Second
 	// DefaultVNetAddressPrefix is the default address space for auto-created VNets
 	DefaultVNetAddressPrefix = "10.0.0.0/16"
 	// DefaultSubnetAddressPrefix is the default address prefix for auto-created subnets
 	DefaultSubnetAddressPrefix = "10.0.0.0/24"
+	// DefaultVNetName is the default VNet name when subnetID is empty (auto-create mode)
+	DefaultVNetName = "cloudburst-vnet"
+	// DefaultSubnetName is the default subnet name when subnetID is empty (auto-create mode)
+	DefaultSubnetName = "default"
 )
 
 // Provisioner handles Azure VM provisioning (NIC + VM).
@@ -58,7 +62,8 @@ type Provisioner struct {
 	resourceGroup string
 	location      string
 	subnetID      string
-	infraReady    bool // true after ensureInfrastructure succeeds
+	infraReady    bool   // true after ensureInfrastructure succeeds
+	infraMu       sync.Mutex
 }
 
 // NewProvisioner creates a new Azure provisioner using Service Principal or default credential chain.
@@ -67,9 +72,7 @@ func NewProvisioner(ctx context.Context, subscriptionID, resourceGroup, location
 	if subscriptionID == "" || resourceGroup == "" || location == "" {
 		return nil, fmt.Errorf("subscriptionID, resourceGroup, and location are required")
 	}
-	if subnetID == "" {
-		return nil, fmt.Errorf("subnetID is required for Azure VM (create NIC in subnet)")
-	}
+	// subnetID may be empty; when empty, ensureInfrastructure will auto-create VNet and subnet
 
 	var cred azcore.TokenCredential
 	var err error
@@ -117,16 +120,26 @@ func NewProvisioner(ctx context.Context, subscriptionID, resourceGroup, location
 }
 
 // ensureInfrastructure creates the resource group, VNet, and subnet if they don't already exist.
-// It parses the subnetID to extract VNet and subnet names.
+// When subnetID is empty, it auto-creates VNet and subnet with default names and sets p.subnetID.
+// When subnetID is set, it parses it to extract VNet and subnet names and ensures they exist.
 // Idempotent: safe to call multiple times; skipped after first success.
 func (p *Provisioner) ensureInfrastructure(ctx context.Context) error {
+	p.infraMu.Lock()
+	defer p.infraMu.Unlock()
 	if p.infraReady {
 		return nil
 	}
 
-	vnetName, subnetName, err := parseSubnetID(p.subnetID)
-	if err != nil {
-		return fmt.Errorf("cannot parse subnetID %q: %w", p.subnetID, err)
+	var vnetName, subnetName string
+	if p.subnetID == "" {
+		vnetName = DefaultVNetName
+		subnetName = DefaultSubnetName
+	} else {
+		var err error
+		vnetName, subnetName, err = parseSubnetID(p.subnetID)
+		if err != nil {
+			return fmt.Errorf("cannot parse subnetID %q: %w", p.subnetID, err)
+		}
 	}
 
 	// 1. Ensure resource group
@@ -172,6 +185,12 @@ func (p *Provisioner) ensureInfrastructure(ctx context.Context) error {
 		}
 	}
 
+	// When subnetID was empty, set it to the resolved full resource ID
+	if p.subnetID == "" {
+		p.subnetID = fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s/subnets/%s",
+			p.subID, p.resourceGroup, vnetName, subnetName)
+	}
+
 	p.infraReady = true
 	return nil
 }
@@ -205,26 +224,16 @@ func (p *Provisioner) CreateInstance(ctx context.Context, name, vmSize, location
 		return "", fmt.Errorf("failed to ensure Azure infrastructure: %w", err)
 	}
 
-	var lastErr error
-	for attempt := 0; attempt <= MaxRetries; attempt++ {
-		if attempt > 0 {
-			waitTime := RetryDelay * time.Duration(1<<uint(attempt-1))
-			select {
-			case <-ctx.Done():
-				return "", fmt.Errorf("context cancelled: %w", ctx.Err())
-			case <-time.After(waitTime):
-			}
-		}
-		instanceID, err := p.createInstanceOnce(ctx, name, vmSize, startupScript, imageFromConfig)
-		if err == nil {
-			return instanceID, nil
-		}
-		if !isRetryableError(err) {
-			return "", err
-		}
-		lastErr = err
+	var instanceID string
+	err := provutil.WithRetry(ctx, provutil.MaxRetries, provutil.RetryDelay, isRetryableError, func() error {
+		var retryErr error
+		instanceID, retryErr = p.createInstanceOnce(ctx, name, vmSize, startupScript, imageFromConfig)
+		return retryErr
+	})
+	if err != nil {
+		return "", err
 	}
-	return "", fmt.Errorf("failed after %d attempts: %w", MaxRetries+1, lastErr)
+	return instanceID, nil
 }
 
 func (p *Provisioner) createInstanceOnce(ctx context.Context, name, vmSize, startupScript, imageFromConfig string) (string, error) {
@@ -268,9 +277,8 @@ func (p *Provisioner) createInstanceOnce(ctx context.Context, name, vmSize, star
 				ImageReference: imageRef,
 				OSDisk: &armcompute.OSDisk{
 					CreateOption: ptr(armcompute.DiskCreateOptionTypesFromImage),
+					DeleteOption: ptr(armcompute.DiskDeleteOptionTypesDelete),
 					ManagedDisk: &armcompute.ManagedDiskParameters{
-						// Use Standard_LRS for broad VM size compatibility. Premium_LRS is not supported
-						// by A-series (e.g. Standard_A2_v2) and other Basic-tier sizes.
 						StorageAccountType: ptr(armcompute.StorageAccountTypesStandardLRS),
 					},
 					DiskSizeGB: ptr(int32(30)),
@@ -288,7 +296,12 @@ func (p *Provisioner) createInstanceOnce(ctx context.Context, name, vmSize, star
 			},
 			NetworkProfile: &armcompute.NetworkProfile{
 				NetworkInterfaces: []*armcompute.NetworkInterfaceReference{
-					{ID: ptr(fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/networkInterfaces/%s", p.subID, p.resourceGroup, nicName))},
+					{
+						ID: ptr(fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/networkInterfaces/%s", p.subID, p.resourceGroup, nicName)),
+						Properties: &armcompute.NetworkInterfaceReferenceProperties{
+							DeleteOption: ptr(armcompute.DeleteOptionsDelete),
+						},
+					},
 				},
 			},
 		},
@@ -299,13 +312,13 @@ func (p *Provisioner) createInstanceOnce(ctx context.Context, name, vmSize, star
 
 	vmPoller, err := p.vmClient.BeginCreateOrUpdate(ctx, p.resourceGroup, name, vmParams, nil)
 	if err != nil {
-		_, _ = p.nicClient.BeginDelete(ctx, p.resourceGroup, nicName, nil)
+		p.cleanupNIC(ctx, nicName)
 		return "", fmt.Errorf("failed to create VM: %w", err)
 	}
 	_, err = vmPoller.PollUntilDone(ctx, nil)
 	if err != nil {
 		_, _ = p.vmClient.BeginDelete(ctx, p.resourceGroup, name, nil)
-		_, _ = p.nicClient.BeginDelete(ctx, p.resourceGroup, nicName, nil)
+		p.cleanupNIC(ctx, nicName)
 		return "", fmt.Errorf("failed waiting for VM: %w", err)
 	}
 
@@ -363,7 +376,10 @@ func generatePassword() string {
 	return "Cb!9" + base64.URLEncoding.EncodeToString(b)
 }
 
-// DeleteInstance deletes the Azure VM and its NIC. instanceID must be "azure/<resourceGroup>/<vmName>".
+// DeleteInstance deletes the Azure VM and all associated resources.
+// The OS disk and NIC are configured with DeleteOption=Delete at creation time,
+// so Azure automatically removes them when the VM is deleted.
+// As a safety net for VMs created before this setting, we also attempt explicit NIC deletion.
 func (p *Provisioner) DeleteInstance(ctx context.Context, instanceID string) error {
 	_, vmName, err := parseInstanceID(instanceID)
 	if err != nil {
@@ -371,17 +387,22 @@ func (p *Provisioner) DeleteInstance(ctx context.Context, instanceID string) err
 	}
 	nicName := vmName + NICNameSuffix
 
-	vmPoller, err := p.vmClient.BeginDelete(ctx, p.resourceGroup, vmName, nil)
+	// forceDeletion=true ensures Azure cleans up even if the VM is stuck.
+	vmPoller, err := p.vmClient.BeginDelete(ctx, p.resourceGroup, vmName, &armcompute.VirtualMachinesClientBeginDeleteOptions{
+		ForceDeletion: ptr(true),
+	})
 	if err != nil {
 		return fmt.Errorf("failed to delete VM: %w", err)
 	}
-	_, _ = vmPoller.PollUntilDone(ctx, nil)
-
-	nicPoller, err := p.nicClient.BeginDelete(ctx, p.resourceGroup, nicName, nil)
-	if err != nil {
-		return fmt.Errorf("failed to delete NIC: %w", err)
+	if _, err := vmPoller.PollUntilDone(ctx, nil); err != nil {
+		return fmt.Errorf("failed waiting for VM deletion: %w", err)
 	}
-	_, _ = nicPoller.PollUntilDone(ctx, nil)
+
+	// Explicitly delete NIC. Azure may auto-delete it when DeleteOption=Delete is set at VM creation,
+	// but we always attempt explicit deletion to ensure no orphaned NICs. If already deleted (404), treat as success.
+	if err := p.deleteNICWithReservationRetry(ctx, nicName, "delete"); err != nil {
+		return fmt.Errorf("failed to delete NIC %s: %w", nicName, err)
+	}
 	return nil
 }
 
@@ -398,12 +419,21 @@ func (p *Provisioner) IsInstanceRunning(ctx context.Context, instanceID string) 
 	if err != nil {
 		return false, fmt.Errorf("failed to get VM: %w", err)
 	}
+	if resp.Properties != nil && resp.Properties.ProvisioningState != nil && *resp.Properties.ProvisioningState == "Failed" {
+		return false, &cberrors.InstanceFailedError{Reason: "provisioning state: Failed"}
+	}
 	if resp.Properties == nil || resp.Properties.InstanceView == nil || len(resp.Properties.InstanceView.Statuses) == 0 {
 		return false, nil
 	}
 	for _, s := range resp.Properties.InstanceView.Statuses {
-		if s.Code != nil && *s.Code == "PowerState/running" {
+		if s.Code == nil {
+			continue
+		}
+		switch *s.Code {
+		case "PowerState/running":
 			return true, nil
+		case "PowerState/deallocated":
+			return false, &cberrors.InstanceFailedError{Reason: "power state: deallocated"}
 		}
 	}
 	return false, nil
@@ -419,28 +449,65 @@ func GenerateInstanceName(nodeClaimName string) string {
 	return nodeClaimName
 }
 
-func parseInstanceID(instanceID string) (string, string, error) {
-	if !strings.HasPrefix(instanceID, InstanceIDPrefix) {
-		return "", "", fmt.Errorf("invalid Azure instance ID format: %s", instanceID)
+// cleanupNIC attempts to delete a NIC and waits for completion. Errors are logged but not returned
+// because this runs on the create-failure path where the primary error matters more.
+func (p *Provisioner) cleanupNIC(ctx context.Context, nicName string) {
+	if err := p.deleteNICWithReservationRetry(ctx, nicName, "create-failure"); err != nil {
+		slog.WarnContext(ctx, "failed to complete NIC cleanup", "nic", nicName, "error", err)
 	}
-	rest := strings.TrimPrefix(instanceID, InstanceIDPrefix)
-	parts := strings.SplitN(rest, "/", 2)
-	if len(parts) != 2 {
-		return "", "", fmt.Errorf("invalid Azure instance ID format: %s", instanceID)
-	}
-	return parts[0], parts[1], nil
 }
 
-func isRetryableError(err error) bool {
+// deleteNICWithReservationRetry deletes a NIC. If Azure returns NicReservedForAnotherVm (NIC
+// reserved for 180s after VM create/delete), it waits 190s and retries in the same call so the
+// caller can be sure the NIC is deleted before returning.
+func (p *Provisioner) deleteNICWithReservationRetry(ctx context.Context, nicName, label string) error {
+	nicPoller, err := p.nicClient.BeginDelete(ctx, p.resourceGroup, nicName, nil)
+	if err != nil {
+		if isNotFoundError(err) {
+			// NIC already deleted (e.g. auto-deleted with VM); success
+			return nil
+		}
+		if isNicReservedForAnotherVM(err) {
+			slog.InfoContext(ctx, "NIC reserved for VM (180s); waiting 190s then retrying",
+				"nic", nicName, "label", label)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(190 * time.Second):
+				// Retry delete after reservation window
+				return p.deleteNICWithReservationRetry(ctx, nicName, label)
+			}
+		}
+		return err
+	}
+	if _, err := nicPoller.PollUntilDone(ctx, nil); err != nil {
+		return fmt.Errorf("poll until done: %w", err)
+	}
+	return nil
+}
+
+func isNicReservedForAnotherVM(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "NicReservedForAnotherVm")
+}
+
+func isNotFoundError(err error) bool {
 	if err == nil {
 		return false
 	}
-	errStr := err.Error()
-	retryable := []string{"rate limit", "throttl", "temporary", "timeout", "deadline exceeded", "unavailable", "503", "502", "500"}
-	for _, r := range retryable {
-		if strings.Contains(strings.ToLower(errStr), r) {
-			return true
-		}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "404") || strings.Contains(s, "not found") || strings.Contains(s, "resourcenotfound")
+}
+
+func parseInstanceID(instanceID string) (string, string, error) {
+	return provutil.ParseInstanceID(instanceID, InstanceIDPrefix)
+}
+
+func isRetryableError(err error) bool {
+	if provutil.IsRetryableError(err) {
+		return true
 	}
-	return false
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "throttl")
 }
